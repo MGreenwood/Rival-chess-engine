@@ -91,4 +91,20 @@ tensorboard/
 *.temp
 *.bak
 *.swp
-*~ 
+*~
+
+# Rust build artifacts
+engine/target/
+*.dll
+*.exe
+*.pdb
+*.lib
+*.rlib
+*.rmeta
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env
+.venv 
