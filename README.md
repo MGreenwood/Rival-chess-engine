@@ -6,15 +6,19 @@ A novel chess engine implementing the Chess Heterogeneous Encoding State System 
 
 ```
 rival_ai/
-├── engine/           # Rust core
-│   ├── core/        # Core chess logic
-│   ├── pag/         # PAG implementation
-│   └── search/      # Search implementation
-├── training/        # Python training code
-│   ├── models/      # GNN implementations
-│   ├── data/        # Data handling
-│   └── rl/          # Reinforcement learning
-└── bridge/          # Rust-Python bridge
+├── engine/           # Rust core engine
+│   ├── src/         # Core chess logic and implementation
+│   ├── examples/    # Example usage and tests
+│   └── web/         # Web interface components
+├── python/          # Python training and analysis
+│   ├── src/        # Core Python implementation
+│   ├── scripts/    # Training and utility scripts
+│   └── analysis/   # Analysis tools and notebooks
+├── analysis/        # Project-wide analysis tools
+├── scripts/         # Utility scripts
+├── experiments/     # Training experiment outputs
+├── self_play_data/ # Generated self-play games
+└── logs/           # Training and runtime logs
 ```
 
 ## Setup Instructions
@@ -41,7 +45,7 @@ source venv/bin/activate
 3. Install required packages:
 ```bash
 # Install all dependencies from requirements.txt
-pip install -r python/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### Building the Project
@@ -55,7 +59,7 @@ cargo build
 2. Set up Python environment:
 ```bash
 # Make sure your virtual environment is activated
-pip install -r requirements.txt
+pip install -e .  # Install the Python package in development mode
 ```
 
 ## Training
@@ -94,10 +98,10 @@ python python/scripts/train.py \
 ### Training Output
 
 The training process generates:
-- Model checkpoints in `experiments/<experiment_name>/checkpoints/`
+- Model checkpoints in `checkpoints/<experiment_name>/`
 - Self-play games in `self_play_data/`
-- Training logs in `experiments/<experiment_name>/logs/`
-- TensorBoard visualizations (if enabled)
+- Training logs in `logs/`
+- TensorBoard visualizations in `runs/` (if enabled)
 
 Current training metrics include:
 - Policy loss
@@ -120,21 +124,21 @@ You can monitor training progress in several ways:
      - Game statistics (planned)
 
 2. **Log Files**
-   - Check the experiment logs directory for detailed training logs:
+   - Check the logs directory for detailed training logs:
    ```bash
    # On Windows:
-   type experiments\rival_ai_v1\logs\training.log
+   type logs\training.log
    # On Linux/Mac:
-   tail -f experiments/rival_ai_v1/logs/training.log
+   tail -f logs/training.log
    ```
 
 3. **Checkpoints**
-   - Monitor model improvements in the experiment checkpoints directory:
+   - Monitor model improvements in the checkpoints directory:
    ```bash
    # On Windows:
-   dir experiments\rival_ai_v1\checkpoints
+   dir checkpoints\rival_ai_v1
    # On Linux/Mac:
-   ls -l experiments/rival_ai_v1/checkpoints/
+   ls -l checkpoints/rival_ai_v1/
    ```
    - Checkpoints are saved after each epoch
    - Metrics are included in checkpoint files
@@ -166,7 +170,7 @@ The debug logs are particularly useful for:
 To view training progress with TensorBoard:
 ```bash
 # Make sure your virtual environment is activated
-tensorboard --logdir logs
+tensorboard --logdir runs
 ```
 
 Then open your browser to `http://localhost:6006` to view:
