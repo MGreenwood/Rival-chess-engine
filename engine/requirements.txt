@@ -1,0 +1,17 @@
+python-chess>=1.999
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+torch-geometric>=2.3.0
+numpy>=1.21.0
+typing-extensions>=4.0.0
+# For development and testing
+pytest>=7.0.0
+black>=22.0.0
+mypy>=1.0.0
+ruff>=0.1.0
+# For documentation
+sphinx>=6.0.0
+sphinx-rtd-theme>=1.0.0
+# For type checking
+types-setuptools>=65.0.0 

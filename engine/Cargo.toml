@@ -1,0 +1,68 @@
+[package]
+name = "rival_ai"
+version = "0.1.0"
+edition = "2021"
+authors = ["RivalAI Contributors"]
+description = "A chess engine using Positional Adjacency Graphs"
+license = "MIT"
+
+[features]
+default = []
+python = ["pyo3/extension-module"]
+
+[dependencies]
+# Core dependencies
+petgraph = "0.6.3"  # For graph data structures
+rand = "0.8.5"      # For MCTS
+rand_distr = "0.4.3"  # For Dirichlet noise
+rayon = "1.8.0"     # For parallel processing
+serde = { version = "1.0", features = ["derive"] }  # For serialization
+serde_json = "1.0"  # For JSON serialization
+chess = "3.2.0"     # Chess rules and move generation
+clap = { version = "4.4.6", features = ["derive"] }  # CLI arguments
+anyhow = "1.0"   # Error handling
+thiserror = "1.0.50"  # Error definitions
+log = "0.4.20"      # Logging
+env_logger = "0.10.1"  # Logging setup
+parking_lot = "0.12"  # Better RwLock implementation
+ordered-float = "3.7"  # Ordered floating point comparisons
+
+# Web server dependencies
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1.36", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures = "0.3"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+tungstenite = "0.24"
+tokio-tungstenite = "0.24"
+actix-web = "4.4.0"
+dotenv = "0.15.0"
+actix-cors = "0.7.1"
+actix-web-actors = "4"
+actix = "0.13.5"
+
+# Optional Python dependencies
+pyo3 = { version = "0.19.2", features = ["extension-module"] }
+numpy = { version = "0.19", optional = true }      # NumPy integration
+tch = { version = "0.13.0", features = ["download-libtorch"] }        # PyTorch bindings
+
+# Development dependencies
+[dev-dependencies]
+criterion = "0.5"  # For benchmarking
+pretty_assertions = "1.4"  # For better test output
+
+[lib]
+name = "rival_ai"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "play"
+path = "src/bin/play.rs"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs" 

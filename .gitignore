@@ -1,0 +1,94 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env
+.venv
+
+# Model files and checkpoints
+*.pkl
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.model
+*.bin
+*.onnx
+*.tflite
+*.pb
+*.savedmodel
+*.weights
+*.npy
+*.npz
+
+# Training data and logs
+experiments/
+data/
+logs/
+*.log
+*.csv
+*.json
+*.jsonl
+*.txt
+!requirements.txt
+!README.txt
+
+# Self-play data
+self_play_data/
+test_output/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# TensorBoard
+runs/
+tensorboard/
+*.tfevents.*
+
+# Profiling and debugging
+*.prof
+*.trace
+*.dump
+*.core
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~ 

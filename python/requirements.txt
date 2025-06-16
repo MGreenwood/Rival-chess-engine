@@ -1,0 +1,16 @@
+maturin
+--find-links https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+torch-geometric>=2.3.0
+networkx>=3.0
+msgpack>=1.0.0
+numpy>=1.21.0
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-benchmark>=4.0.0
+tqdm>=4.65.0  # For progress bars
+matplotlib>=3.5.0  # For visualization
+python-chess>=1.10.0  # For chess board representation and move generation
+PyQt5>=5.15.0 
