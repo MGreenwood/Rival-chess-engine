@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 #[derive(Clone)]
 pub struct ModelBridge {
     model: PyObject,
-    device: String,
+    _device: String,
 }
 
 #[pymethods]
@@ -15,7 +15,7 @@ impl ModelBridge {
     pub fn new(model: PyObject, device: Option<String>) -> Self {
         Self {
             model,
-            device: device.unwrap_or_else(|| String::from("cuda")),
+            _device: device.unwrap_or_else(|| String::from("cuda")),
         }
     }
     
@@ -57,6 +57,6 @@ mod tests {
     #[test]
     fn test_model_bridge_creation() {
         let bridge = ModelBridge::new(PyObject::new(Python::with_gil(|py| py.None())), None);
-        assert!(bridge.device == "cuda");
+        assert!(bridge._device == "cuda");
     }
 } 

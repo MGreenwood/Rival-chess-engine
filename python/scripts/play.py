@@ -4,10 +4,9 @@ import sys
 from pathlib import Path
 import chess
 import torch
-from rival_ai.models.gnn import ChessGNN
+from rival_ai.models import ChessGNN
 from rival_ai.mcts import MCTS, MCTSConfig
-from rival_ai.utils.board_conversion import board_to_hetero_data
-from rival_ai.training.trainer import Trainer
+from rival_ai.data import board_to_hetero_data
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,13 +19,32 @@ def parse_args():
                       help='Number of MCTS simulations per move')
     parser.add_argument('--temperature', type=float, default=0.1,
                       help='Temperature for move selection (lower = more deterministic)')
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
+                      help='Device to use (cuda/cpu)')
     return parser.parse_args()
 
-def load_model(checkpoint_path):
+def load_model(checkpoint_path, device):
     """Load model from checkpoint."""
-    checkpoint = torch.load(checkpoint_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
-    model = ChessGNN()
-    model.load_state_dict(checkpoint['model_state_dict'])
+    logger.info(f"Loading model from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Create model with same architecture as training
+    model = ChessGNN(
+        hidden_dim=256,
+        num_layers=4,
+        num_heads=4,
+        dropout=0.1
+    )
+    
+    # Load model state
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info("Loaded model state from checkpoint")
+    else:
+        logger.error("No model_state_dict found in checkpoint")
+        return None
+    
+    model = model.to(device)
     model.eval()
     return model
 
@@ -49,25 +67,35 @@ def get_move_from_user(board):
 def get_model_move(board, model, mcts, temperature):
     """Get a move from the model using MCTS."""
     with torch.no_grad():
-        # Convert board to HeteroData
-        data = board_to_hetero_data(board)
-        data = data.to(model.device)
+        # Run MCTS search
+        mcts.search(board)
+        root = mcts.root
         
-        # Run MCTS
-        root = mcts.search(board, model)
+        # Get policy from root node
+        policy = root.get_policy()
         
-        # Select move based on visit counts and temperature
+        if not policy:
+            # Fallback: choose first legal move
+            return list(board.legal_moves)[0]
+        
+        # Select move based on policy and temperature
         if temperature == 0:
-            # Deterministic: choose move with most visits
-            move = max(root.children.items(), key=lambda x: x[1].visit_count)[0]
+            # Deterministic: choose move with highest probability
+            move_idx = max(policy.items(), key=lambda x: x[1])[0]
         else:
-            # Probabilistic: sample based on visit counts
-            moves = list(root.children.keys())
-            visit_counts = torch.tensor([root.children[m].visit_count for m in moves])
-            probs = (visit_counts ** (1/temperature)).float()
+            # Probabilistic: sample based on probabilities
+            moves = list(policy.keys())
+            probs = torch.tensor([policy[move] for move in moves])
+            probs = (probs ** (1/temperature)).float()
             probs = probs / probs.sum()
             move_idx = torch.multinomial(probs, 1).item()
-            move = moves[move_idx]
+            move_idx = moves[move_idx]
+        
+        # Convert move index back to chess move
+        move = mcts._move_idx_to_move(move_idx, board)
+        if move is None:
+            # Fallback: choose first legal move
+            return list(board.legal_moves)[0]
         
         return move
 
@@ -75,18 +103,20 @@ def main():
     args = parse_args()
     
     # Load model
-    logger.info(f"Loading model from {args.checkpoint}")
-    model = load_model(args.checkpoint)
-    model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
+    model = load_model(args.checkpoint, args.device)
+    if model is None:
+        logger.error("Failed to load model")
+        return
     
     # Initialize MCTS
     mcts_config = MCTSConfig(
         num_simulations=args.num_simulations,
         c_puct=1.0,
         dirichlet_alpha=0.3,
-        dirichlet_weight=0.25
+        dirichlet_weight=0.25,
+        temperature=args.temperature
     )
-    mcts = MCTS(mcts_config)
+    mcts = MCTS(model, mcts_config)
     
     # Initialize board
     board = chess.Board()

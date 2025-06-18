@@ -7,8 +7,28 @@ use uuid::Uuid;
 use serde_json;
 use actix_web_actors::ws;
 use actix::{Actor, StreamHandler, ActorContext};
-use rival_ai::{Engine, bridge::python::ModelBridge};
+use rival_ai::Engine;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use pyo3::PyErr;
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "rival-ai-server")]
+#[command(about = "RivalAI Chess Engine Server")]
+struct Args {
+    /// Path to the model checkpoint file
+    #[arg(short, long, default_value = "experiments/rival_ai_v1_Alice/run_20250616_154501/checkpoints/best_model.pt")]
+    checkpoint: String,
+    
+    /// Server port
+    #[arg(short, long, default_value = "3000")]
+    port: u16,
+    
+    /// Server host
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+}
 
 #[derive(Deserialize)]
 struct MoveRequest {
@@ -32,15 +52,15 @@ struct AppState {
 #[derive(Deserialize)]
 struct GameSettings {
     // Accept but ignore for now
-    timeControl: Option<TimeControl>,
-    engineStrength: Option<u32>,
-    color: Option<String>,
+    _time_control: Option<TimeControl>,
+    _engine_strength: Option<u32>,
+    _color: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TimeControl {
-    initial: u32,
-    increment: u32,
+    _initial: u32,
+    _increment: u32,
 }
 
 #[derive(Serialize)]
@@ -145,33 +165,13 @@ async fn make_move(
             println!("Move is legal, applying...");
             engine.make_move(chess_move);
             
-            // Get engine's response move
-            let engine_move = if let Some(mv) = engine.get_best_move(engine.board()) {
-                let move_str = format!("{}{}", mv.get_source(), mv.get_dest());
-                let promotion = mv.get_promotion().map(|p| match p {
-                    chess::Piece::Queen => 'q',
-                    chess::Piece::Rook => 'r',
-                    chess::Piece::Bishop => 'b',
-                    chess::Piece::Knight => 'n',
-                    _ => unreachable!(),
-                });
-                let move_str = if let Some(p) = promotion {
-                    format!("{}{}", move_str, p)
-                } else {
-                    move_str
-                };
-                engine.make_move(mv);
-                Some(move_str)
-            } else {
-                None
-            };
-
+            // Respond immediately, do not make engine move yet
             HttpResponse::Ok().json(MoveResponse {
                 success: true,
                 board: engine.board().to_string(),
                 status: if engine.is_game_over() { "game_over".to_string() } else { "active".to_string() },
-                engine_move,
-                is_player_turn: true,
+                engine_move: None,
+                is_player_turn: false, // Now it's the engine's turn
                 error_message: None,
             })
         }
@@ -189,6 +189,53 @@ async fn make_move(
     }
 }
 
+// New endpoint: engine makes its move
+async fn engine_move(
+    data: web::Data<AppState>,
+    _game_id: web::Path<String>,
+) -> impl Responder {
+    let mut engine = data.engine.lock().unwrap();
+    let board = engine.board();
+    if engine.is_game_over() {
+        return HttpResponse::Ok().json(MoveResponse {
+            success: true,
+            board: board.to_string(),
+            status: "game_over".to_string(),
+            engine_move: None,
+            is_player_turn: true,
+            error_message: None,
+        });
+    }
+    // Get engine's move
+    let engine_move = if let Some(mv) = engine.get_best_move(board) {
+        let move_str = format!("{}{}", mv.get_source(), mv.get_dest());
+        let promotion = mv.get_promotion().map(|p| match p {
+            chess::Piece::Queen => 'q',
+            chess::Piece::Rook => 'r',
+            chess::Piece::Bishop => 'b',
+            chess::Piece::Knight => 'n',
+            _ => unreachable!(),
+        });
+        let move_str = if let Some(p) = promotion {
+            format!("{}{}", move_str, p)
+        } else {
+            move_str
+        };
+        engine.make_move(mv);
+        Some(move_str)
+    } else {
+        None
+    };
+    HttpResponse::Ok().json(MoveResponse {
+        success: true,
+        board: engine.board().to_string(),
+        status: if engine.is_game_over() { "game_over".to_string() } else { "active".to_string() },
+        engine_move,
+        is_player_turn: true, // Now it's the player's turn
+        error_message: None,
+    })
+}
+
 async fn create_game(
     _settings: web::Json<serde_json::Value>,
 ) -> impl Responder {
@@ -198,20 +245,51 @@ async fn create_game(
         game_id,
         board,
         status: "active".to_string(),
-        move_history: vec![],
+        move_history: Vec::new(),
         is_player_turn: true,
     };
     HttpResponse::Ok().json(state)
 }
 
+async fn reset_game(
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let mut engine = data.engine.lock().unwrap();
+    // Reset the engine to starting position
+    *engine = Engine::new();
+    
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "message": "Game reset to starting position"
+    }))
+}
+
+async fn get_game(
+    data: web::Data<AppState>,
+    game_id: web::Path<String>,
+) -> impl Responder {
+    let engine = data.engine.lock().unwrap();
+    let board = engine.board();
+    
+    let state = GameState {
+        game_id: game_id.into_inner(),
+        board: board.to_string(),
+        status: if engine.is_game_over() { "game_over".to_string() } else { "active".to_string() },
+        move_history: Vec::new(), // TODO: Track move history
+        is_player_turn: true,
+    };
+    
+    HttpResponse::Ok().json(state)
+}
+
 struct MyWebSocket {
-    game_id: String,
+    _game_id: String,
     engine: web::Data<AppState>,
 }
 
 impl MyWebSocket {
     fn new(game_id: String, engine: web::Data<AppState>) -> Self {
-        Self { game_id, engine }
+        Self { _game_id: game_id, engine }
     }
 
     fn send_game_state(&self, ctx: &mut ws::WebsocketContext<Self>) {
@@ -238,6 +316,11 @@ impl Actor for MyWebSocket {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        // Reset the engine to starting position for new games
+        if let Ok(mut engine) = self.engine.engine.lock() {
+            engine.reset();
+        }
+        
         // Send initial game state
         self.send_game_state(ctx);
     }
@@ -282,190 +365,247 @@ async fn ws_route(
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
     
+    // Parse command line arguments
+    let args = Args::parse();
+    
     // Initialize Python interpreter
     pyo3::prepare_freethreaded_python();
     
-    // Create engine with proper model loading
+    println!("Using checkpoint: {}", args.checkpoint);
+    
+    // Set up Python environment
+    let python_src_path = "../python/src";
+    let venv_path = "venvEngine/Lib/site-packages";
+    std::env::set_var("PYTHONPATH", format!("{};{}", python_src_path, venv_path));
+    
+    // Initialize Python with proper model loading
     let engine = Python::with_gil(|py| {
-        // Try to set up the Python environment
-        let setup_result = py.run(r#"
-import sys
-import os
-
-# Try to add the Python source path
-try:
-    sys.path.append('../python/src')
-    print(f"Added Python source path: {os.path.abspath('../python/src')}")
-except Exception as e:
-    print(f"Could not add Python source path: {e}")
-
-# Try to add the engine's venv path
-try:
-    venv_path = os.path.join(os.getcwd(), 'venvEngine', 'Lib', 'site-packages')
-    if os.path.exists(venv_path):
-        sys.path.insert(0, venv_path)
-        print(f"Added venv path: {venv_path}")
-    else:
-        print(f"Venv path not found: {venv_path}")
-except Exception as e:
-    print(f"Could not add venv path: {e}")
-
-print("Python path:")
-for p in sys.path[:10]:  # Show first 10 paths
-    print(f"  {p}")
-"#, None, None);
+        // Add paths to Python sys.path
+        let sys = py.import("sys").unwrap();
+        let sys_path = sys.getattr("path").unwrap();
+        sys_path.call_method1("insert", (0, python_src_path)).unwrap();
+        sys_path.call_method1("insert", (0, venv_path)).unwrap();
         
-        if let Err(e) = setup_result {
-            println!("Warning: Python setup failed: {}", e);
-        }
-        
-        // Try to create the model wrapper with error handling
-        let model_code = r#"
-import sys
-
-class ModelWrapper:
-    def __init__(self, checkpoint_path=None):
-        self.has_torch = False
-        self.has_model = False
-        
-        try:
-            import torch
-            import chess
-            from rival_ai.models import ChessGNN
-            from rival_ai.pag import PositionalAdjacencyGraph
-            import numpy as np
-            
-            self.has_torch = True
-            print("Successfully imported PyTorch and dependencies")
-            
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.model = ChessGNN(hidden_dim=256, num_layers=4, num_heads=4, dropout=0.1)
-            
-            if checkpoint_path:
-                try:
-                    checkpoint = torch.load(checkpoint_path, map_location=self.device)
-                    if 'model_state_dict' in checkpoint:
-                        self.model.load_state_dict(checkpoint['model_state_dict'])
-                    else:
-                        self.model.load_state_dict(checkpoint)
-                    print(f"Loaded model from {checkpoint_path}")
-                    self.has_model = True
-                except Exception as e:
-                    print(f"Failed to load model from {checkpoint_path}: {e}")
-                    print("Using randomly initialized model")
-            else:
-                print("Using randomly initialized model")
-                
-            self.model.to(self.device)
-            self.model.eval()
-            
-        except ImportError as e:
-            print(f"Could not import required modules: {e}")
-            print("Falling back to random policy generation")
-            # Import basic modules for fallback
-            try:
-                import random
-                import numpy as np
-                self.np = np
-                self.random = random
-            except ImportError:
-                print("Could not import numpy/random, using pure Python fallback")
-                self.np = None
-                self.random = None
-        except Exception as e:
-            print(f"Error initializing model: {e}")
-            print("Using fallback mode")
-    
-    def _generate_random_policy(self):
-        """Generate a random policy vector."""
-        if self.np is not None:
-            policy = self.np.random.random(5312).astype(self.np.float32)
-            policy = policy / policy.sum()  # Normalize
-            return policy.tolist()
-        else:
-            # Pure Python fallback
-            import random
-            policy = [random.random() for _ in range(5312)]
-            total = sum(policy)
-            policy = [p / total for p in policy]  # Normalize
-            return policy
-    
-    def _generate_random_value(self):
-        """Generate a random value between -1 and 1."""
-        if self.random is not None:
-            return self.random.random() * 2 - 1
-        else:
-            import random
-            return random.random() * 2 - 1
-    
-    def predict(self):
-        """Predict policy and value for current position."""
-        policy = self._generate_random_policy()
-        value = self._generate_random_value()
-        return policy, float(value)
-    
-    def predict_with_board(self, fen_string):
-        """Predict policy and value for a given board position."""
-        try:
-            if self.has_torch:
-                import chess
-                board = chess.Board(fen_string)
-                # TODO: Implement proper PAG conversion and model inference
-                # For now, return random values even with torch available
-                
-            policy = self._generate_random_policy()
-            value = self._generate_random_value()
-            return policy, float(value)
-            
-        except Exception as e:
-            print(f"Error in predict_with_board: {e}")
-            # Return default random policy
-            policy = self._generate_random_policy()
-            value = 0.0
-            return policy, float(value)
-    
-    def predict_batch(self, fen_strings):
-        """Predict policies and values for a batch of positions."""
-        policies = []
-        values = []
-        for fen in fen_strings:
-            policy, value = self.predict_with_board(fen)
-            policies.append(policy)
-            values.append(value)
-        return policies, values
-"#;
-        
-        // Execute the model wrapper code
-        match py.run(model_code, None, None) {
-            Ok(_) => println!("Model wrapper code executed successfully"),
-            Err(e) => {
-                println!("Error executing model wrapper code: {}", e);
-                return Engine::new(); // Fallback to engine without model
+        println!("Python path:");
+        for path_result in sys_path.iter().unwrap() {
+            match path_result {
+                Ok(path) => {
+                    match path.str() {
+                        Ok(path_str) => println!("  {}", path_str),
+                        Err(_) => println!("  <invalid path>"),
+                    }
+                },
+                Err(_) => println!("  <error reading path>"),
             }
         }
         
-        // Create the model wrapper instance
-        let model_wrapper_result = py.eval("ModelWrapper('checkpoints/rival_ai/checkpoint_20250615_042203_epoch_159.pt')", None, None);
-        
-        match model_wrapper_result {
-            Ok(model_wrapper) => {
-                let bridge = ModelBridge::new(model_wrapper.to_object(py), Some("cuda".to_string()));
-                println!("Created model bridge with proper model loading");
-                Engine::new_with_model(bridge)
-            }
+        // Try to import torch with error handling
+        println!("Attempting to import PyTorch...");
+        let torch_result = py.import("torch");
+        match torch_result {
+            Ok(torch) => {
+                println!("PyTorch imported successfully");
+                
+                // Try to create the model with error handling
+                match create_model_safely(py, torch, &args.checkpoint) {
+                    Ok(model_bridge) => {
+                        println!("Model created successfully");
+                        rival_ai::Engine::new_with_model(model_bridge)
+                    },
+                    Err(e) => {
+                        println!("Model creation failed: {}. Using fallback model.", e);
+                        create_fallback_engine(py)
+                    }
+                }
+            },
             Err(e) => {
-                println!("Error creating model wrapper: {}", e);
-                println!("Falling back to engine without neural network model");
-                Engine::new()
+                println!("Failed to import PyTorch: {}. Using fallback model.", e);
+                create_fallback_engine(py)
             }
         }
     });
+    
+    // Helper function to create model safely
+    fn create_model_safely(py: Python, torch: &PyModule, checkpoint_path: &str) -> PyResult<rival_ai::ModelBridge> {
+        // Try to create model with automatic device selection
+        println!("Creating model with automatic device selection");
+        
+        // Try to create model directly
+        match create_model_with_device(py, torch, checkpoint_path) {
+            Ok(model_bridge) => {
+                println!("Model created successfully");
+                return Ok(model_bridge);
+            },
+            Err(e) => {
+                println!("Model creation failed: {}. This is unexpected.", e);
+                return Err(e);
+            }
+        }
+    }
+    
+    // Helper function to create model with automatic device selection
+    fn create_model_with_device(py: Python, torch: &PyModule, checkpoint_path: &str) -> PyResult<rival_ai::ModelBridge> {
+        println!("Creating model with automatic device selection");
+        
+        // Check if CUDA is available and select device
+        let device_str = if torch.getattr("cuda")?.getattr("is_available")?.call0()?.extract::<bool>()? {
+            "cuda"
+        } else {
+            "cpu"
+        };
+        let device = torch.getattr("device")?.call1((device_str,))?;
+        println!("Selected device: {}", device_str);
+        
+        // First, ensure chess module is available
+        println!("Importing chess module...");
+        let chess_result = py.import("chess");
+        match chess_result {
+            Ok(_chess) => {
+                println!("Chess module imported successfully");
+            },
+            Err(e) => {
+                println!("Failed to import chess module: {}. This is required for the model.", e);
+                return Err(PyErr::new::<pyo3::exceptions::PyImportError, _>("Chess module not available"));
+            }
+        }
+        
+        // Import model wrapper
+        println!("Importing rival_ai.models.gnn...");
+        let model_wrapper_result = py.import("rival_ai.models.gnn");
+        match model_wrapper_result {
+            Ok(model_wrapper) => {
+                println!("rival_ai.models.gnn imported successfully");
+                
+                // Get the ChessGNN class
+                let model_class_result = model_wrapper.getattr("ChessGNN");
+                match model_class_result {
+                    Ok(model_class) => {
+                        println!("ChessGNN class found");
+                        
+                        // Create model instance
+                        let model_result = model_class.call0();
+                        match model_result {
+                            Ok(model) => {
+                                println!("Model instance created successfully");
+                                
+                                // Move model to the correct device after creation
+                                let to_device_result = model.call_method1("to", (device,));
+                                match to_device_result {
+                                    Ok(model) => {
+                                        println!("Model moved to device successfully");
+                                        
+                                        // Load checkpoint
+                                        let checkpoint_result = torch.getattr("load")?.call1((checkpoint_path,));
+                                        match checkpoint_result {
+                                            Ok(checkpoint) => {
+                                                println!("Checkpoint loaded successfully");
+                                                
+                                                // Load state dict
+                                                let model_state_dict = checkpoint.get_item("model_state_dict")?;
+                                                let load_result = model.call_method1("load_state_dict", (model_state_dict,));
+                                                match load_result {
+                                                    Ok(_) => {
+                                                        println!("State dict loaded successfully");
+                                                        
+                                                        // Set to evaluation mode
+                                                        let eval_result = model.call_method0("eval");
+                                                        match eval_result {
+                                                            Ok(_) => {
+                                                                println!("Model set to evaluation mode");
+                                                                
+                                                                // Create ModelBridge from the Python model
+                                                                Ok(rival_ai::ModelBridge::new(model.into(), Some(device_str.to_string())))
+                                                            },
+                                                            Err(e) => {
+                                                                println!("Failed to set model to evaluation mode: {}", e);
+                                                                Err(e)
+                                                            }
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        println!("Failed to load state dict: {}", e);
+                                                        Err(e)
+                                                    }
+                                                }
+                                            },
+                                            Err(e) => {
+                                                println!("Failed to load checkpoint: {}", e);
+                                                Err(e)
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        println!("Failed to move model to device: {}", e);
+                                        Err(e)
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                println!("Failed to create model instance: {}", e);
+                                Err(e)
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("Failed to get ChessGNN class: {}", e);
+                        Err(e)
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Failed to import rival_ai.models.gnn: {}", e);
+                Err(e)
+            }
+        }
+    }
+    
+    // Helper function to create fallback engine
+    fn create_fallback_engine(py: Python) -> rival_ai::Engine {
+        println!("Creating fallback engine with random move generator");
+        
+        // Create a simple fallback model that returns random moves
+        let code = r#"
+import random
+import chess
+
+class FallbackModel:
+    def __init__(self):
+        self.name = "Fallback Random Model"
+    
+    def predict_with_board(self, board_fen):
+        board = chess.Board(board_fen)
+        legal_moves = list(board.legal_moves)
+        if legal_moves:
+            move = random.choice(legal_moves)
+            # Create a dummy policy vector (all zeros except for the chosen move)
+            policy = [0.0] * 5312  # Total number of possible moves
+            # Set a high probability for the chosen move (simplified)
+            policy[0] = 1.0
+            return (policy, 0.0)  # Return policy and value
+        return ([0.0] * 5312, 0.0)
+    
+    def eval(self):
+        pass
+
+FallbackModel()
+"#;
+        
+        let locals = PyDict::new(py);
+        py.run(code, None, Some(locals)).unwrap();
+        let fallback_model = locals.get_item("FallbackModel").unwrap().call0().unwrap();
+        
+        // Create ModelBridge from the fallback model
+        let model_bridge = rival_ai::ModelBridge::new(fallback_model.into(), Some("cpu".to_string()));
+        
+        // Create Engine with the fallback model
+        rival_ai::Engine::new_with_model(model_bridge)
+    }
     
     let app_state = web::Data::new(AppState {
         engine: Mutex::new(engine),
     });
 
-    println!("Starting RivalAI server on http://127.0.0.1:3000");
+    println!("Starting RivalAI server on http://{}:{}", args.host, args.port);
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
@@ -477,11 +617,14 @@ class ModelWrapper:
             .wrap(cors)
             .wrap(middleware::Logger::default())
             .app_data(app_state.clone())
-            .route("/api/games", web::post().to(create_game))
             .route("/api/games/{game_id}/moves", web::post().to(make_move))
+            .route("/api/games/{game_id}/engine-move", web::post().to(engine_move))
+            .route("/api/games", web::post().to(create_game))
+            .route("/api/games/{game_id}", web::get().to(get_game))
+            .route("/api/games/{game_id}/reset", web::post().to(reset_game))
             .route("/ws/{game_id}", web::get().to(ws_route))
     })
-    .bind("127.0.0.1:3000")?
+    .bind(format!("{}:{}", args.host, args.port))?
     .run()
     .await
 } 

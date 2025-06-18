@@ -130,7 +130,7 @@ class ModelWrapper:
         let model_path = if args.len() > 1 {
             args[1].clone()
         } else {
-            "checkpoints/rival_ai/checkpoint_20250615_042203_epoch_159.pt".to_string()
+            "experiments/rival_ai_v1_Alice/run_20250616_154501/checkpoints/best_model.pt".to_string()
         };
         
         let model_wrapper = py.eval(&format!("ModelWrapper('{}')", model_path), None, None).unwrap();

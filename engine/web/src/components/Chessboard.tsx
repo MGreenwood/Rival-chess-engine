@@ -125,9 +125,19 @@ export function ChessGame({ onMove, onGameOver }: ChessboardProps) {
   // Update game over status
   useEffect(() => {
     console.log('Game state updated:', gameState);
-    if (gameState?.status && ['checkmate', 'stalemate', 'draw'].includes(gameState.status)) {
-      console.log('Game over:', gameState.status);
-      onGameOver?.(gameState.status);
+    if (gameState?.status) {
+      console.log('Game status detected:', gameState.status);
+      // Explicitly handle all game ending states
+      if (gameState.status === 'checkmate') {
+        console.log('Checkmate detected!');
+        onGameOver?.('checkmate');
+      } else if (gameState.status === 'stalemate') {
+        console.log('Stalemate detected!');
+        onGameOver?.('stalemate');
+      } else if (gameState.status === 'draw') {
+        console.log('Draw detected!');
+        onGameOver?.('draw');
+      }
     }
   }, [gameState?.status, onGameOver, gameState]);
 
@@ -136,6 +146,17 @@ export function ChessGame({ onMove, onGameOver }: ChessboardProps) {
     console.log('Starting new game on mount');
     startNewGame();
   }, [startNewGame]);
+
+  // Highlight last move squares
+  let lastMoveFrom: Square | undefined;
+  let lastMoveTo: Square | undefined;
+  if (gameState?.move_history && gameState.move_history.length > 0) {
+    const lastMove = gameState.move_history[gameState.move_history.length - 1];
+    if (lastMove.length >= 4) {
+      lastMoveFrom = lastMove.slice(0, 2) as Square;
+      lastMoveTo = lastMove.slice(2, 4) as Square;
+    }
+  }
 
   if (error) {
     console.error('Rendering error state:', error);
@@ -161,13 +182,17 @@ export function ChessGame({ onMove, onGameOver }: ChessboardProps) {
       <div className="mb-4">
         <h2 className="text-xl font-bold mb-2">RivalAI Chess</h2>
         {gameState?.status && (
-          <div className={`text-sm ${
-            gameState.status === 'check' ? 'text-red-600' :
-            gameState.status === 'checkmate' ? 'text-red-600' :
+          <div className={`text-sm font-bold ${
+            gameState.status === 'check' ? 'text-yellow-600' :
+            gameState.status === 'checkmate' ? 'text-red-600 text-lg' :
             gameState.status === 'stalemate' ? 'text-yellow-600' :
+            gameState.status === 'draw' ? 'text-blue-600' :
             'text-gray-600'
           }`}>
-            {gameState.status.charAt(0).toUpperCase() + gameState.status.slice(1)}
+            {gameState.status === 'checkmate' ? 'Checkmate! Game Over' :
+             gameState.status === 'stalemate' ? 'Stalemate! Game Over' :
+             gameState.status === 'draw' ? 'Draw! Game Over' :
+             gameState.status.charAt(0).toUpperCase() + gameState.status.slice(1)}
           </div>
         )}
       </div>
@@ -188,9 +213,20 @@ export function ChessGame({ onMove, onGameOver }: ChessboardProps) {
                 backgroundColor: 'rgba(123, 97, 255, 0.4)',
               },
             }),
+            ...(lastMoveFrom && {
+              [lastMoveFrom]: {
+                backgroundColor: 'rgba(255, 215, 0, 0.35)', // soft yellow
+              },
+            }),
+            ...(lastMoveTo && {
+              [lastMoveTo]: {
+                backgroundColor: 'rgba(97, 255, 123, 0.35)', // soft green
+              },
+            }),
           }}
           areArrowsAllowed={true}
           showBoardNotation={true}
+          animationDuration={gameState?.is_player_turn ? 0 : 100}
         />
         
         {gameState && !gameState.is_player_turn && !loading && (

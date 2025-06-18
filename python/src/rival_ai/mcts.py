@@ -134,6 +134,9 @@ class MCTS:
             
         # Initialize random state for consistent hashing
         self._init_hash_keys()
+        
+        self.position_history = []  # Track positions for repetition detection
+        self.max_history = 20  # Track more positions
     
     def _init_hash_keys(self):
         """Initialize random keys for Zobrist hashing."""
@@ -289,6 +292,50 @@ class MCTS:
         
         return policies, values.item()
     
+    def _get_position_key(self, board):
+        """Get a unique key for the current position."""
+        return board.fen()
+
+    def _would_cause_repetition(self, board, move):
+        """Check if a move would cause a repetition."""
+        # Make a copy of the board and try the move
+        test_board = board.copy()
+        test_board.push(move)
+        new_pos = self._get_position_key(test_board)
+        
+        # Count how many times this position has occurred recently
+        recent_count = self.position_history.count(new_pos)
+        return recent_count > 0
+
+    def _apply_repetition_penalty(self, policy: torch.Tensor, board: chess.Board, move_count: int) -> torch.Tensor:
+        """Apply penalty to moves that would cause repetition.
+        
+        Args:
+            policy: Policy tensor
+            board: Current board position
+            move_count: Current move count
+            
+        Returns:
+            Modified policy tensor
+        """
+        if move_count < 30:  # Only apply in opening/middlegame
+            num_pieces = len(board.piece_map())
+            if num_pieces >= 12:  # Only apply when enough pieces are on board
+                for move in board.legal_moves:
+                    if self._would_cause_repetition(board, move):
+                        move_idx = self._move_to_move_idx(move)
+                        if move_idx is not None:
+                            # Scale penalty based on game phase
+                            if move_count < 10:
+                                policy[move_idx] *= 0.1  # Very early repetition
+                            elif move_count < 20:
+                                policy[move_idx] *= 0.2  # Early repetition
+                            elif move_count < 30:
+                                policy[move_idx] *= 0.3  # Middlegame repetition
+                            else:
+                                policy[move_idx] *= 0.4  # Late repetition
+        return policy
+
     def search(self, board: chess.Board, root: Optional[MCTSNode] = None, epoch: Optional[int] = None, game_count: Optional[int] = None) -> None:
         """Perform MCTS search from the given position.
         
@@ -310,12 +357,19 @@ class MCTS:
             
         # Initialize search board
         search_board = board.copy()
+        move_count = search_board.fullmove_number
+        
+        # Update position history
+        self.position_history.append(self._get_position_key(board))
+        if len(self.position_history) > self.max_history:
+            self.position_history.pop(0)
         
         # Perform simulations
         for sim in range(self.config.num_simulations):
             # Selection
             node = root
             search_board = board.copy()
+            current_move_count = move_count
             
             # Selection phase
             while node.is_expanded and not search_board.is_game_over():
@@ -327,11 +381,10 @@ class MCTS:
                         ucb_scores[move] = float('inf')
                     else:
                         # UCB = Q + c_puct * P * sqrt(N) / (1 + n)
-                        # where Q is the value, P is the prior, N is parent visits, n is child visits
-                        q_value = float(-child.value_sum / child.visit_count)  # Convert to float for negamax
-                        prior = child.prior  # Already a float from MCTSNode
-                        parent_visits = float(node.visit_count)  # Convert to float
-                        child_visits = float(child.visit_count)  # Convert to float
+                        q_value = float(-child.value_sum / child.visit_count)
+                        prior = child.prior
+                        parent_visits = float(node.visit_count)
+                        child_visits = float(child.visit_count)
                         
                         # Calculate UCB score with explicit float arithmetic
                         exploration_term = self.config.c_puct * prior * math.sqrt(parent_visits) / (1.0 + child_visits)
@@ -339,13 +392,14 @@ class MCTS:
                         ucb_scores[move] = ucb_score
                 
                 # Select move with highest UCB score
-                if not ucb_scores:  # Handle case where no moves are available
+                if not ucb_scores:
                     break
                     
                 move = max(ucb_scores.items(), key=lambda x: x[1])[0]
                 
                 # Make move
                 search_board.push(move)
+                current_move_count += 1
                 node = node.children[move]
             
             # Expansion
@@ -358,6 +412,9 @@ class MCTS:
                 if node == root:
                     policy = self._apply_dirichlet_noise(policy, legal_mask)
                 
+                # Apply repetition penalty
+                policy = self._apply_repetition_penalty(policy, search_board, current_move_count)
+                
                 # Mask illegal moves and convert to probabilities
                 policy = policy.masked_fill(~legal_mask, float('-inf'))
                 policy = F.softmax(policy, dim=0)
@@ -368,19 +425,37 @@ class MCTS:
                 # Create children for all legal moves
                 for move in search_board.legal_moves:
                     move_idx = self._move_to_move_idx(move)
-                    if move_idx is not None:  # Ensure move index is valid
-                        prior_value = float(policy[move_idx].item())  # Convert to float
+                    if move_idx is not None:
+                        prior_value = float(policy[move_idx].item())
                         node.children[move] = MCTSNode(prior=prior_value)
             
             # Evaluation
             if search_board.is_game_over():
-                # Game is over, use actual result
+                # Game is over, use actual result with move-count-aware rewards
                 if search_board.is_checkmate():
-                    value = -1.0  # Current player lost
-                elif search_board.is_stalemate() or search_board.is_insufficient_material():
-                    value = 0.0  # Draw
+                    # Reward quick checkmates, penalize quick checkmate losses
+                    if current_move_count <= 20:
+                        value = -2.0 if search_board.turn else 2.0  # Double value for quick checkmate
+                    elif current_move_count <= 30:
+                        value = -1.5 if search_board.turn else 1.5  # 50% bonus for early checkmate
+                    else:
+                        value = -1.0 if search_board.turn else 1.0  # Normal checkmate value
+                elif search_board.is_stalemate():
+                    value = -0.1  # Small penalty for stalemate
+                elif search_board.is_insufficient_material():
+                    value = 0.0  # Neutral for insufficient material
+                elif search_board.is_repetition():
+                    # Strong penalties for repetition draws
+                    if current_move_count < 10:
+                        value = -3.0  # Very early repetition
+                    elif current_move_count < 20:
+                        value = -2.5  # Early repetition
+                    elif current_move_count < 30:
+                        value = -2.0  # Middlegame repetition
+                    else:
+                        value = -1.5  # Late repetition
                 else:
-                    value = 0.0  # Other draw conditions
+                    value = 0.0  # Neutral for other legitimate draws
             else:
                 # Get value from neural network
                 value = self._get_value(search_board)
@@ -611,6 +686,15 @@ class MCTS:
         Returns:
             torch.Tensor: Policy with Dirichlet noise applied
         """
+        # Ensure policy and legal_mask have the same shape
+        if policy.dim() == 2 and legal_mask.dim() == 1:
+            # Policy has batch dimension [1, 5312], legal_mask is [5312]
+            # Remove batch dimension from policy or add to legal_mask
+            policy = policy.squeeze(0)  # Remove batch dimension
+        elif policy.dim() == 1 and legal_mask.dim() == 2:
+            # Policy is [5312], legal_mask has batch dimension [1, 5312]
+            legal_mask = legal_mask.squeeze(0)  # Remove batch dimension
+        
         # Create Dirichlet noise
         noise = torch.distributions.Dirichlet(
             torch.full((legal_mask.sum(),), self.config.dirichlet_alpha, device=self.device)

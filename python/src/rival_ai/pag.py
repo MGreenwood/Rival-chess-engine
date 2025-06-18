@@ -23,18 +23,29 @@ logger = logging.getLogger(__name__)
 class PAGConfig:
     """Configuration for PAG construction."""
     edge_dims: Dict[str, int] = None  # Will be set to default in __post_init__
+    use_advanced_features: bool = True
+    use_piece_mobility: bool = True
+    use_king_safety: bool = True
+    use_pawn_structure: bool = True
+    use_piece_coordination: bool = True
+    use_center_control: bool = True
+    use_material_balance: bool = True
+    use_attack_patterns: bool = True
 
     def __post_init__(self):
         """Set default edge dimensions if not provided."""
         if self.edge_dims is None:
             self.edge_dims = {
-                'direct_relation': 8,
-                'control': 6,
-                'mobility': 7,
-                'cooperation': 5,
-                'obstruction': 6,
-                'vulnerability': 7,
-                'pawn_structure': 8,
+                'direct_relation': 12,  # Increased for more features
+                'control': 8,  # Added king safety
+                'mobility': 10,  # Added piece-specific mobility
+                'cooperation': 8,  # Added attack patterns
+                'obstruction': 8,  # Added blocking patterns
+                'vulnerability': 10,  # Added piece-specific threats
+                'pawn_structure': 12,  # Added pawn chain analysis
+                'king_safety': 10,  # New edge type
+                'center_control': 8,  # New edge type
+                'material_tension': 6,  # New edge type
             }
 
 class RayType(Enum):
@@ -56,6 +67,19 @@ _legal_moves_cache = weakref.WeakKeyDictionary()
 _control_counts_cache = weakref.WeakKeyDictionary()
 _cache_lock = Lock()
 
+class ChessFeatures(Enum):
+    """Enhanced chess features for PAG."""
+    MOBILITY = 'mobility'
+    CONTROL = 'control'
+    ATTACK = 'attack'
+    DEFENSE = 'defense'
+    KING_SAFETY = 'king_safety'
+    PAWN_STRUCTURE = 'pawn_structure'
+    CENTER_CONTROL = 'center_control'
+    MATERIAL_BALANCE = 'material_balance'
+    PIECE_COORDINATION = 'piece_coordination'
+    ATTACK_PATTERNS = 'attack_patterns'
+
 @dataclass
 class PositionalAdjacencyGraph:
     """Represents a chess position as a graph where nodes are pieces and critical squares,
@@ -69,13 +93,13 @@ class PositionalAdjacencyGraph:
             config: Optional MCTS configuration for edge dimensions
         """
         self.board = board
-        self.config = config
+        self.config = config or MCTSConfig()
         
-        # Initialize node dictionaries
+        # Initialize node dictionaries with enhanced features
         self.piece_nodes: Dict[int, Dict] = {}  # square -> node features
         self.critical_square_nodes: Dict[int, Dict] = {}  # square -> node features
         
-        # Initialize edge feature dictionaries
+        # Initialize edge feature dictionaries with new edge types
         self.direct_edges: Dict[Tuple[int, int], Dict] = {}  # (from_square, to_square) -> edge features
         self.control_edges: Dict[Tuple[int, int], Dict] = {}  # (piece_square, square) -> edge features
         self.mobility_edges: Dict[Tuple[int, int], Dict] = {}  # (piece_square, square) -> edge features
@@ -83,105 +107,375 @@ class PositionalAdjacencyGraph:
         self.obstructive_edges: Dict[Tuple[int, int], Dict] = {}  # (piece_square, piece_square) -> edge features
         self.vulnerability_edges: Dict[Tuple[int, int], Dict] = {}  # (piece_square, piece_square) -> edge features
         self.pawn_structure_edges: Dict[Tuple[int, int], Dict] = {}  # (pawn_square, pawn_square) -> edge features
+        self.king_safety_edges: Dict[Tuple[int, int], Dict] = {}  # (king_square, defender_square) -> edge features
+        self.center_control_edges: Dict[Tuple[int, int], Dict] = {}  # (piece_square, center_square) -> edge features
+        self.material_tension_edges: Dict[Tuple[int, int], Dict] = {}  # (attacker_square, target_square) -> edge features
         
         # Build the graph
         self._build_graph()
     
     def _build_graph(self):
-        """Build the graph representation of the position."""
-        # Add piece nodes
+        """Build the positional adjacency graph with enhanced features."""
+        # Add piece nodes with enhanced features
         for square in chess.SQUARES:
             piece = self.board.piece_at(square)
-            if piece is not None:
-                self.piece_nodes[square] = {
-                    'type': piece.piece_type,
-                    'color': piece.color,
-                    'mobility': self._is_piece_mobile(square),
-                    'is_pinned': self._is_piece_pinned(square),
-                    'is_checking': self._is_piece_checking(square),
-                    'is_protected': self._is_piece_protected(square),
-                    'is_mobile': self._is_piece_mobile(square),
-                    'is_valuable': piece.piece_type in [chess.QUEEN, chess.ROOK]
-                }
-        
-        # Add critical square nodes
-        for square in chess.SQUARES:
-            self.critical_square_nodes[square] = {
-                'is_attacked': self._is_square_attacked(square, chess.WHITE) or self._is_square_attacked(square, chess.BLACK),
-                'is_controlled': self._is_square_controlled(square),
-                'is_pawn_square': self._is_pawn_square(square),
-                'is_center_square': self._is_center_square(square),
-                'is_king_square': self._is_king_square(square)
-            }
-        
-        # Add edges
-        for square1 in chess.SQUARES:
-            piece1 = self.board.piece_at(square1)
-            if piece1 is not None:
-                for square2 in chess.SQUARES:
-                    piece2 = self.board.piece_at(square2)
-                    if piece2 is not None:
-                        # Direct relations
-                        if self._can_move_to(square1, square2):
-                            self.direct_edges[(square1, square2)] = {
-                                'type': 'attack' if piece1.color != piece2.color else 'support',
-                                'distance': chess.square_distance(square1, square2),
-                                'is_capture': piece1.color != piece2.color
-                            }
-                        
-                        # Cooperation
-                        if piece1.color == piece2.color and self._are_pieces_cooperative(square1, square2):
-                            self.cooperative_edges[(square1, square2)] = {
-                                'type': 'protection' if self._is_piece_protected(square2) else 'support',
-                                'distance': chess.square_distance(square1, square2)
-                            }
-                        
-                        # Obstruction
-                        if piece1.color != piece2.color and self._are_pieces_obstructive(square1, square2):
-                            self.obstructive_edges[(square1, square2)] = {
-                                'type': 'block' if self._is_path_blocked(square1, square2) else 'threat',
-                                'distance': chess.square_distance(square1, square2)
-                            }
-                        
-                        # Vulnerability
-                        if piece1.color != piece2.color and self._are_pieces_vulnerable(square1, square2):
-                            self.vulnerability_edges[(square1, square2)] = {
-                                'type': 'attack' if self._can_attack(square1, square2) else 'threat',
-                                'distance': chess.square_distance(square1, square2)
-                            }
-                    
-                    # Control edges
-                    if self._controls_square(square1, square2):
-                        self.control_edges[(square1, square2)] = {
-                            'type': 'control',
-                            'distance': chess.square_distance(square1, square2)
-                        }
-                    
-                    # Mobility edges
-                    if self._can_move_to(square1, square2):
-                        self.mobility_edges[(square1, square2)] = {
-                            'type': 'mobility',
-                            'distance': chess.square_distance(square1, square2)
-                        }
-        
-        # Add pawn structure edges
-        for square1 in chess.SQUARES:
-            piece1 = self.board.piece_at(square1)
-            if piece1 is not None and piece1.piece_type == chess.PAWN:
-                for square2 in chess.SQUARES:
-                    piece2 = self.board.piece_at(square2)
-                    if piece2 is not None and piece2.piece_type == chess.PAWN and piece1.color == piece2.color:
-                        if self._are_pawns_connected(square1, square2):
-                            self.pawn_structure_edges[(square1, square2)] = {
-                                'type': 'connected',
-                                'distance': chess.square_distance(square1, square2)
-                            }
-                        elif self._are_pawns_related(square1, square2):
-                            self.pawn_structure_edges[(square1, square2)] = {
-                                'type': 'chain',
-                                'distance': chess.square_distance(square1, square2)
-                            }
+            if piece:
+                self.piece_nodes[square] = self._get_piece_features(square, piece)
+
+        # Add critical squares (center, outposts, key squares)
+        self._add_critical_squares()
+
+        # Build all edge types
+        self._build_direct_edges()
+        self._build_control_edges()
+        self._build_mobility_edges()
+        self._build_cooperative_edges()
+        self._build_obstructive_edges()
+        self._build_vulnerability_edges()
+        self._build_pawn_structure_edges()
+        self._build_king_safety_edges()
+        self._build_center_control_edges()
+        self._build_material_tension_edges()
     
+    def _get_piece_features(self, square: int, piece: chess.Piece) -> Dict:
+        """Get enhanced piece features."""
+        features = {
+            'piece_type': piece.piece_type,
+            'color': int(piece.color),
+            'mobility': self._calculate_mobility(square, piece),
+            'control': self._calculate_control(square, piece),
+            'attack_value': self._calculate_attack_value(square, piece),
+            'defense_value': self._calculate_defense_value(square, piece),
+            'development': self._calculate_development(square, piece),
+            'center_distance': self._calculate_center_distance(square),
+            'king_distance': self._calculate_king_distance(square, piece),
+            'pawn_shield': self._calculate_pawn_shield(square, piece),
+        }
+        return features
+
+    def _calculate_mobility(self, square: int, piece: chess.Piece) -> float:
+        """Calculate piece mobility with advanced metrics."""
+        if not self.config.use_piece_mobility:
+            return 0.0
+
+        legal_moves = set(move.to_square for move in self.board.legal_moves 
+                         if move.from_square == square)
+        
+        # Weight mobility by piece type and position
+        weights = {
+            chess.PAWN: 0.5,
+            chess.KNIGHT: 1.0,
+            chess.BISHOP: 1.2,
+            chess.ROOK: 1.0,
+            chess.QUEEN: 0.8,
+            chess.KING: 0.3
+        }
+        
+        base_mobility = len(legal_moves) * weights[piece.piece_type]
+        
+        # Adjust for center control
+        center_moves = sum(1 for sq in legal_moves if self._is_center_square(sq))
+        center_bonus = center_moves * 0.2
+        
+        # Adjust for piece development
+        development_bonus = self._calculate_development(square, piece) * 0.1
+        
+        return base_mobility + center_bonus + development_bonus
+
+    def _calculate_control(self, square: int, piece: chess.Piece) -> float:
+        """Calculate square control with advanced metrics."""
+        if not self.config.use_center_control:
+            return 0.0
+
+        controlled_squares = self._get_controlled_squares(square, piece)
+        
+        # Weight control by square importance
+        total_control = 0.0
+        for sq in controlled_squares:
+            weight = 1.0
+            if self._is_center_square(sq):
+                weight = 2.0
+            elif self._is_extended_center(sq):
+                weight = 1.5
+            elif self._is_king_zone(sq, piece.color):
+                weight = 1.8
+            total_control += weight
+            
+        return total_control
+
+    def _calculate_attack_value(self, square: int, piece: chess.Piece) -> float:
+        """Calculate attacking potential."""
+        if not self.config.use_attack_patterns:
+            return 0.0
+
+        attacked_pieces = self._get_attacked_pieces(square, piece)
+        
+        # Weight attacks by target value
+        piece_values = {
+            chess.PAWN: 1.0,
+            chess.KNIGHT: 3.0,
+            chess.BISHOP: 3.0,
+            chess.ROOK: 5.0,
+            chess.QUEEN: 9.0,
+            chess.KING: 0.5  # Lower weight for king attacks as they rarely lead to immediate capture
+        }
+        
+        total_attack = sum(piece_values[p.piece_type] for p in attacked_pieces)
+        
+        # Add bonus for attacking protected pieces
+        protected_attacks = sum(1.0 for p in attacked_pieces if self._is_protected(p))
+        total_attack += protected_attacks * 0.5
+        
+        return total_attack
+
+    def _build_king_safety_edges(self):
+        """Build edges representing king safety features."""
+        if not self.config.use_king_safety:
+            return
+
+        for color in [chess.WHITE, chess.BLACK]:
+            king_square = self.board.king(color)
+            if king_square is None:
+                continue
+
+            # Get king zone squares
+            king_zone = self._get_king_zone(king_square)
+            
+            # Analyze pawn shield
+            pawn_shield_value = self._analyze_pawn_shield(king_square, color)
+            
+            # Analyze piece defense
+            for square in chess.SQUARES:
+                piece = self.board.piece_at(square)
+                if piece and piece.color == color:
+                    defense_value = self._calculate_king_defense_contribution(square, king_square)
+                    if defense_value > 0:
+                        self.king_safety_edges[(square, king_square)] = {
+                            'defense_value': defense_value,
+                            'distance': chess.square_distance(square, king_square),
+                            'pawn_shield': float(square in pawn_shield_value),
+                            'is_defender': 1.0,
+                            'attack_lines': self._count_attack_lines(square, king_square),
+                        }
+
+    def _build_center_control_edges(self):
+        """Build edges representing center control."""
+        if not self.config.use_center_control:
+            return
+
+        center_squares = {chess.E4, chess.E5, chess.D4, chess.D5}
+        extended_center = {chess.C3, chess.C4, chess.C5, chess.C6,
+                         chess.D3, chess.D6,
+                         chess.E3, chess.E6,
+                         chess.F3, chess.F4, chess.F5, chess.F6}
+        
+        for square in chess.SQUARES:
+            piece = self.board.piece_at(square)
+            if not piece:
+                continue
+                
+            # Calculate control over center squares
+            controlled_squares = self._get_controlled_squares(square, piece)
+            center_control = controlled_squares & center_squares
+            extended_control = controlled_squares & extended_center
+            
+            for target in center_control:
+                self.center_control_edges[(square, target)] = {
+                    'control_value': 2.0,  # Higher weight for main center
+                    'distance': chess.square_distance(square, target),
+                    'is_attacked': float(self._is_square_attacked(target, piece.color)),
+                    'is_defended': float(self._is_square_defended(target, piece.color)),
+                }
+                
+            for target in extended_control:
+                self.center_control_edges[(square, target)] = {
+                    'control_value': 1.0,  # Lower weight for extended center
+                    'distance': chess.square_distance(square, target),
+                    'is_attacked': float(self._is_square_attacked(target, piece.color)),
+                    'is_defended': float(self._is_square_defended(target, piece.color)),
+                }
+
+    def _build_material_tension_edges(self):
+        """Build edges representing material tension/threats."""
+        if not self.config.use_material_balance:
+            return
+
+        for square in chess.SQUARES:
+            attacker = self.board.piece_at(square)
+            if not attacker:
+                continue
+                
+            # Find all pieces under attack
+            attacked_pieces = self._get_attacked_pieces(square, attacker)
+            
+            for target_square, target_piece in attacked_pieces:
+                # Calculate material tension features
+                self.material_tension_edges[(square, target_square)] = {
+                    'material_delta': self._calculate_material_delta(attacker, target_piece),
+                    'is_protected': float(self._is_protected(target_square)),
+                    'exchange_value': self._calculate_exchange_value(square, target_square),
+                    'attack_count': self._count_attackers(target_square),
+                    'defense_count': self._count_defenders(target_square),
+                }
+
+    def _get_king_zone(self, king_square: int) -> Set[int]:
+        """Get squares in the king's safety zone."""
+        rank = chess.square_rank(king_square)
+        file = chess.square_file(king_square)
+        
+        zone = set()
+        for r in range(max(0, rank - 2), min(8, rank + 2)):
+            for f in range(max(0, file - 2), min(8, file + 2)):
+                zone.add(chess.square(f, r))
+        
+        return zone
+
+    def _analyze_pawn_shield(self, king_square: int, color: chess.Color) -> Dict[int, float]:
+        """Analyze pawn shield structure in front of king."""
+        rank = chess.square_rank(king_square)
+        file = chess.square_file(king_square)
+        
+        shield_values = {}
+        pawn_ranks = range(rank + 1, min(8, rank + 3)) if color == chess.WHITE else range(max(0, rank - 2), rank)
+        
+        for r in pawn_ranks:
+            for f in range(max(0, file - 1), min(8, file + 2)):
+                square = chess.square(f, r)
+                piece = self.board.piece_at(square)
+                if piece and piece.piece_type == chess.PAWN and piece.color == color:
+                    # Weight by distance from king
+                    distance = abs(f - file) + abs(r - rank)
+                    shield_values[square] = 1.0 / (1.0 + distance)
+                    
+        return shield_values
+
+    def _calculate_king_defense_contribution(self, piece_square: int, king_square: int) -> float:
+        """Calculate how much a piece contributes to king defense."""
+        piece = self.board.piece_at(piece_square)
+        if not piece:
+            return 0.0
+            
+        # Base defense value by piece type
+        defense_values = {
+            chess.PAWN: 1.0,
+            chess.KNIGHT: 0.8,
+            chess.BISHOP: 0.9,
+            chess.ROOK: 1.2,
+            chess.QUEEN: 1.5,
+        }
+        
+        base_value = defense_values.get(piece.piece_type, 0.0)
+        
+        # Adjust by distance to king
+        distance = chess.square_distance(piece_square, king_square)
+        distance_factor = 1.0 / (1.0 + distance)
+        
+        # Adjust by control of squares around king
+        king_zone = self._get_king_zone(king_square)
+        controlled_squares = self._get_controlled_squares(piece_square, piece)
+        zone_control = len(controlled_squares & king_zone) * 0.2
+        
+        return base_value * distance_factor * (1.0 + zone_control)
+
+    def _calculate_material_delta(self, attacker: chess.Piece, target: chess.Piece) -> float:
+        """Calculate material value change in a capture."""
+        piece_values = {
+            chess.PAWN: 1.0,
+            chess.KNIGHT: 3.0,
+            chess.BISHOP: 3.0,
+            chess.ROOK: 5.0,
+            chess.QUEEN: 9.0,
+        }
+        
+        return piece_values.get(target.piece_type, 0.0) - piece_values.get(attacker.piece_type, 0.0)
+
+    def _calculate_exchange_value(self, attacker_square: int, target_square: int) -> float:
+        """Calculate the value of a potential exchange."""
+        # Count attackers and defenders
+        attackers = self._count_attackers(target_square)
+        defenders = self._count_defenders(target_square)
+        
+        # Get piece values
+        attacker = self.board.piece_at(attacker_square)
+        target = self.board.piece_at(target_square)
+        
+        if not attacker or not target:
+            return 0.0
+            
+        # Simple SEE (Static Exchange Evaluation)
+        if attackers > defenders:
+            return self._calculate_material_delta(attacker, target)
+        elif attackers == defenders:
+            return 0.0
+        else:
+            return -self._calculate_material_delta(attacker, target)
+
+    def to_hetero_data(self) -> HeteroData:
+        """Convert the PAG to a heterogeneous graph data object."""
+        data = HeteroData()
+        
+        # Add node features
+        piece_features = []
+        piece_indices = []
+        for square, features in self.piece_nodes.items():
+            piece_features.append(self._normalize_features(features))
+            piece_indices.append(square)
+        
+        if piece_features:
+            data['piece'].x = torch.tensor(piece_features, dtype=torch.float)
+            data['piece'].indices = torch.tensor(piece_indices, dtype=torch.long)
+        
+        # Add edge features for all edge types
+        for edge_type, edges in [
+            ('direct', self.direct_edges),
+            ('control', self.control_edges),
+            ('mobility', self.mobility_edges),
+            ('cooperation', self.cooperative_edges),
+            ('obstruction', self.obstructive_edges),
+            ('vulnerability', self.vulnerability_edges),
+            ('pawn_structure', self.pawn_structure_edges),
+            ('king_safety', self.king_safety_edges),
+            ('center_control', self.center_control_edges),
+            ('material_tension', self.material_tension_edges),
+        ]:
+            if not edges:
+                continue
+                
+            edge_indices = []
+            edge_features = []
+            
+            for (src, dst), features in edges.items():
+                edge_indices.append([src, dst])
+                edge_features.append(self._normalize_features(features))
+                
+            if edge_indices:
+                data[edge_type].edge_index = torch.tensor(edge_indices, dtype=torch.long).t()
+                data[edge_type].edge_attr = torch.tensor(edge_features, dtype=torch.float)
+        
+        return data
+
+    def _normalize_features(self, features: Dict) -> List[float]:
+        """Normalize feature values to a fixed range."""
+        # Convert categorical features to one-hot
+        if 'piece_type' in features:
+            piece_type = features['piece_type']
+            one_hot = [0.0] * 6  # 6 piece types
+            one_hot[piece_type - 1] = 1.0
+            features['piece_type'] = one_hot
+            
+        # Normalize numerical features to [0, 1]
+        for key in ['mobility', 'control', 'attack_value', 'defense_value']:
+            if key in features:
+                features[key] = min(1.0, features[key] / 10.0)
+                
+        # Convert boolean features to float
+        for key in ['is_attacked', 'is_defended', 'is_defender']:
+            if key in features:
+                features[key] = float(features[key])
+                
+        # Flatten dictionary to list
+        return [v if not isinstance(v, list) else v[0] for v in features.values()]
+
     def _get_critical_squares(self) -> Set[int]:
         """Get set of critical squares in the position."""
         critical_squares = set()

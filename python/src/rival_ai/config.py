@@ -43,11 +43,11 @@ class SelfPlayConfig:
     """Configuration for self-play generation."""
     num_games: int = 1000  # Increased from 100 to get more training data
     num_simulations: int = 800  # Match MCTSConfig
-    max_moves: int = 200  # Increased from 100 to allow proper endgame play
-    dirichlet_alpha: float = 0.3
-    dirichlet_weight: float = 0.25
-    temperature: float = 1.0  # Will be modified during game
-    c_puct: float = 0.5  # Match MCTSConfig
+    max_moves: int = 200  # Reduced from 400 to force more decisive play
+    dirichlet_alpha: float = 1.2  # Increased for more noise
+    dirichlet_weight: float = 0.6  # Increased for more exploration
+    temperature: float = 2.0  # Increased for much more variety
+    c_puct: float = 3.0  # Increased to encourage more exploration
     save_dir: str = 'self_play_data'
     device: str = 'cuda'
     batch_size: int = 64
@@ -58,9 +58,34 @@ class SelfPlayConfig:
     prefetch_factor: int = 2
     temperature_decay: float = 0.95  # Decay temperature over time
     min_temperature: float = 0.1  # Minimum temperature to use
-    opening_temperature: float = 1.0  # Temperature for first 10 moves
-    midgame_temperature: float = 0.5  # Temperature for moves 11-30
-    endgame_temperature: float = 0.1  # Temperature for moves 31+
+    opening_temperature: float = 2.5  # Much higher temperature for opening
+    midgame_temperature: float = 2.2  # Higher temperature for middlegame
+    endgame_temperature: float = 1.8  # Higher temperature for endgame
+    
+    # Aggressive play settings
+    capture_bonus: float = 1.0  # Strong bonus for captures
+    check_bonus: float = 0.5  # Bonus for checks
+    attack_bonus: float = 0.3  # Bonus for attacking moves
+    development_bonus: float = 0.4  # Bonus for piece development
+    
+    # Game phase detection
+    opening_moves: int = 15  # First 15 moves are opening
+    midgame_moves: int = 50  # Moves 16-50 are middlegame
+    
+    # Dynamic move limits
+    max_opening_moves: int = 30  # Shorter opening phase
+    max_middlegame_moves: int = 100  # Shorter middlegame
+    max_endgame_moves: int = 150  # Shorter endgame
+    
+    # Forced decisive play settings
+    force_capture_after_moves: int = 20  # Force captures after 20 moves
+    force_attack_after_moves: int = 30  # Force attacks after 30 moves
+    force_win_attempt_after_moves: int = 50  # Force win attempts after 50 moves
+    
+    # Repetition prevention
+    repetition_penalty: float = 8.0  # Much stronger penalties
+    draw_penalty_scale: float = 6.0  # Much stronger draw penalties
+    early_draw_penalty: float = 10.0  # Much stronger early draw penalties
 
 @dataclass
 class TrainingConfig:
@@ -87,6 +112,13 @@ class TrainingConfig:
     scheduler_factor: float = 0.5
     early_stopping_patience: int = 10
     early_stopping_min_delta: float = 1e-4
+    
+    # Loss function configuration
+    use_improved_loss: bool = True  # Use improved loss function
+    policy_weight: float = 1.0
+    value_weight: float = 0.5  # Reduced value weight
+    entropy_weight: float = 0.01
+    l2_weight: float = 1e-4
 
 @dataclass
 class ModelConfig:

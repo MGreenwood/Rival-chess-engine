@@ -46,17 +46,54 @@ class GameRecord:
         self.values.append(value)
     
     def set_result(self, result: GameResult) -> None:
-        """Set the game result."""
+        """Set the game result with move-count-aware rewards.
+        
+        Rewards quick checkmates and strongly penalizes repetitive draws,
+        while being neutral about move count for other legitimate outcomes.
+        """
         self.result = result
-        # Adjust values based on game result
+        move_count = len(self.moves)
+        
+        # Base values for different outcomes
         if result == GameResult.WHITE_WINS:
-            final_value = 1.0
+            # Reward quick checkmates, but don't penalize longer ones
+            if move_count <= 20:  # Quick checkmate
+                final_value = 2.0  # Bonus for quick checkmate
+            elif move_count <= 30:  # Early checkmate
+                final_value = 1.5
+            else:
+                final_value = 1.0  # Normal win value
+                
         elif result == GameResult.BLACK_WINS:
-            final_value = -1.0
+            # Same logic for black wins
+            if move_count <= 20:
+                final_value = -2.0
+            elif move_count <= 30:
+                final_value = -1.5
+            else:
+                final_value = -1.0
+                
         elif result == GameResult.REPETITION_DRAW:
-            final_value = -2.0  # Much stronger penalty for repetition draws
-        else:  # Regular draw
-            final_value = 0.0
+            # Strong penalties for repetitive draws, especially early ones
+            if move_count < 10:  # Very early repetition
+                final_value = -3.0
+            elif move_count < 20:  # Early repetition
+                final_value = -2.5
+            elif move_count < 30:  # Middlegame repetition
+                final_value = -2.0
+            else:  # Late repetition
+                final_value = -1.5
+                
+        else:  # Regular draws (stalemate, insufficient material, etc.)
+            # Neutral value for legitimate draws
+            if self.states[-1].is_insufficient_material():
+                final_value = 0.0  # Completely neutral for insufficient material
+            elif self.states[-1].is_stalemate():
+                final_value = -0.1  # Small penalty for stalemate
+            else:
+                final_value = 0.0  # Neutral for other legitimate draws
+        
+        # Apply the value to all positions, alternating for each player
         self.values = [final_value * (-1) ** (i % 2) for i in range(len(self.values))]
     
     def to_named_tuple(self) -> 'GameRecordTuple':

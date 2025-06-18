@@ -15,6 +15,7 @@ from chess import Move, Board
 import numpy as np
 from torch_geometric.nn import MessagePassing
 import math
+from rival_ai.utils.board_conversion import board_to_hetero_data
 
 logger = logging.getLogger(__name__)
 
@@ -414,4 +415,48 @@ class ChessGNN(nn.Module):
             'use_residual': self.use_residual,
             'piece_dim': self.piece_dim,
             'critical_square_dim': self.critical_square_dim
-        } 
+        }
+    
+    def predict_with_board(self, fen_string: str) -> Tuple[List[float], float]:
+        """Predict policy and value for a given board position.
+        
+        Args:
+            fen_string: FEN string representation of the board position
+            
+        Returns:
+            Tuple of (policy_list, value) where policy_list is a list of 5312 probabilities
+            and value is a float between -1 and 1
+        """
+        try:
+            # Create chess board from FEN
+            board = chess.Board(fen_string)
+            
+            # Convert board to HeteroData
+            data = board_to_hetero_data(board)
+            
+            # Move data to the same device as the model
+            device = next(self.parameters()).device
+            data = data.to(device)
+            
+            # Set model to evaluation mode
+            self.eval()
+            
+            # Get predictions
+            with torch.no_grad():
+                policy_logits, value = self.forward(data)
+                
+                # Convert policy logits to probabilities
+                policy_probs = torch.softmax(policy_logits, dim=-1)
+                
+                # Convert to lists for JSON serialization
+                policy_list = policy_probs.squeeze().cpu().numpy().tolist()
+                value_float = value.squeeze().cpu().item()
+                
+                return policy_list, value_float
+                
+        except Exception as e:
+            logger.error(f"Error in predict_with_board: {e}")
+            # Return default values on error
+            policy_list = [1.0/5312] * 5312  # Uniform distribution
+            value_float = 0.0
+            return policy_list, value_float 

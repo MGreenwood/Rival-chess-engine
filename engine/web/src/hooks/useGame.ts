@@ -57,10 +57,15 @@ export function useGame(initialSettings?: GameSettings) {
                         console.log('[WebSocket] Ignoring state update for different game. prev:', prev?.game_id, 'msg:', gameId);
                         return prev;
                     }
+                    // Check if the game is over due to no legal moves
+                    const isGameOver = message.payload.status === 'checkmate' || 
+                                     message.payload.status === 'stalemate' ||
+                                     message.payload.status === 'draw' ||
+                                     message.payload.error?.includes('No legal moves');
                     const newState: GameState = {
                         ...prev,
                         board: message.payload.board!,
-                        status: message.payload.status || 'active',
+                        status: isGameOver ? (message.payload.status || 'checkmate') : (message.payload.status || 'active'),
                         is_player_turn: true,
                     };
                     console.log('[WebSocket] Updated game state:', newState);
@@ -68,6 +73,14 @@ export function useGame(initialSettings?: GameSettings) {
                 });
             } else if (message.type === 'error') {
                 console.error('[WebSocket] error message:', message.payload.error);
+                // Check if the error indicates a game-ending state
+                if (message.payload.error?.includes('No legal moves')) {
+                    setGameStateWithLog(prev => prev ? {
+                        ...prev,
+                        status: 'checkmate',
+                        is_player_turn: true,
+                    } : prev);
+                }
                 setError(message.payload.error || 'An error occurred');
             }
         } catch (err) {
@@ -158,10 +171,11 @@ const makeMove = useCallback(async (move: string) => {
     throw new Error('Invalid move: not your turn');
   }
 
+  let prevState = gameState;
   try {
     setLoading(true);
     setError(null);
-    console.log('Sending move to server:', move);
+    // 1. Send move to backend
     const response = await axios.post<MoveResponse>(
       `${API_BASE_URL}/games/${gameState.game_id}/moves`,
       { move_str: move } as MoveRequest
@@ -169,24 +183,47 @@ const makeMove = useCallback(async (move: string) => {
     console.log('Move response:', response.data);
 
     if (response.data.success) {
+      // Optimistically update the board and set is_player_turn to false
       setGameStateWithLog(prev => {
         const newState = prev ? {
           ...prev,
           board: response.data.board,
           status: response.data.status,
-          is_player_turn: response.data.is_player_turn,
+          is_player_turn: false,
           move_history: [...prev.move_history, move],
         } : null;
-        console.log('[makeMove] Updated game state:', newState);
         return newState;
       });
     } else {
       throw new Error('Invalid move');
     }
+
+    // 2. Call engine-move endpoint
+    const engineResponse = await axios.post<MoveResponse>(
+      `${API_BASE_URL}/games/${gameState.game_id}/engine-move`
+    );
+    console.log('Engine move response:', engineResponse.data);
+    if (engineResponse.data.success) {
+      setGameStateWithLog(prev => {
+        const newState = prev ? {
+          ...prev,
+          board: engineResponse.data.board,
+          status: engineResponse.data.status,
+          is_player_turn: true,
+          move_history: engineResponse.data.engine_move
+            ? [...prev.move_history, engineResponse.data.engine_move]
+            : prev.move_history,
+        } : null;
+        return newState;
+      });
+    } else {
+      throw new Error('Engine move failed');
+    }
   } catch (err) {
     console.error('Move error:', err);
-    const errorMessage = err instanceof Error ? err.message : 'Failed to make move';
-    setError(errorMessage);
+    setError('Move failed. Please try again.');
+    // Revert to previous state if possible
+    setGameStateWithLog(prev => prevState);
     throw err;
   } finally {
     setLoading(false);

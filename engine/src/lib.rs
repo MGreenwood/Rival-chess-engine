@@ -146,9 +146,9 @@ impl PyEngine {
 #[pyclass]
 pub struct RivalAI {
     engine: Engine,
-    max_depth: u32,
-    max_nodes: u32,
-    model: Option<ModelBridge>,
+    _max_depth: u32,
+    _max_nodes: u32,
+    _model: Option<ModelBridge>,
 }
 
 #[pymethods]
@@ -189,9 +189,9 @@ impl RivalAI {
 
         Ok(Self {
             engine: Engine::new(),
-            max_depth,
-            max_nodes,
-            model,
+            _max_depth: max_depth,
+            _max_nodes: max_nodes,
+            _model: model,
         })
     }
 

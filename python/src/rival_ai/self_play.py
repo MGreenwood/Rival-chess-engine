@@ -75,15 +75,41 @@ class GameRecord:
         self.states.append(state.copy())
     
     def set_result(self, result: GameResult):
-        """Set the game result.
-        
-        Args:
-            result: The game result
-        """
+        """Set the game result with move-count-aware rewards (mirrors training_types.py)."""
         self.result = result
-        
-        # Adjust values based on game result
-        final_value = 1.0 if result == GameResult.WHITE_WINS else -1.0 if result == GameResult.BLACK_WINS else 0.0
+        move_count = len(self.moves)
+        # Base values for different outcomes
+        if result == GameResult.WHITE_WINS:
+            if move_count <= 20:
+                final_value = 2.0
+            elif move_count <= 30:
+                final_value = 1.5
+            else:
+                final_value = 1.0
+        elif result == GameResult.BLACK_WINS:
+            if move_count <= 20:
+                final_value = -2.0
+            elif move_count <= 30:
+                final_value = -1.5
+            else:
+                final_value = -1.0
+        elif result == GameResult.REPETITION_DRAW:
+            if move_count < 10:
+                final_value = -3.0
+            elif move_count < 20:
+                final_value = -2.5
+            elif move_count < 30:
+                final_value = -2.0
+            else:
+                final_value = -1.5
+        else:
+            # Regular draws (stalemate, insufficient material, etc.)
+            if self.states and self.states[-1].is_insufficient_material():
+                final_value = 0.0
+            elif self.states and self.states[-1].is_stalemate():
+                final_value = -0.1
+            else:
+                final_value = 0.0
         self.values = [final_value * (-1) ** (i % 2) for i in range(len(self.values))]
 
 def play_game(mcts: MCTS, max_moves: int = 200) -> GameRecord:

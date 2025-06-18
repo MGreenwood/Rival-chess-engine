@@ -47,7 +47,6 @@ actix = "0.13.5"
 # Optional Python dependencies
 pyo3 = { version = "0.19.2", features = ["extension-module"] }
 numpy = { version = "0.19", optional = true }      # NumPy integration
-tch = { version = "0.13.0", features = ["download-libtorch"] }        # PyTorch bindings
 
 # Development dependencies
 [dev-dependencies]

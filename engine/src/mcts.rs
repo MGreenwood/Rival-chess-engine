@@ -1,144 +1,183 @@
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use std::hash::{Hash, Hasher};
-use rand::prelude::*;
-use rand_distr::Dirichlet;
-use anyhow::Result;
-use parking_lot::RwLock;
-use tch::Tensor;
-use rayon::prelude::*;
-use std::sync::Arc;
+// MCTS for engine/inference: always uses a fresh tree, no node cache, no batch, no locking, no parallel node access.
+// This is different from the training MCTS, which may use persistent node cache and parallelism.
 
-use chess::{Board, ChessMove, MoveGen};
-use crate::bridge::python::ModelBridge;
-use crate::board::PAGBoard;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::cmp::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering, AtomicBool};
+use rand::prelude::*;
+use anyhow::Result;
+use chess::{Board, ChessMove, MoveGen, BoardStatus, Color};
+use crate::ModelBridge;
 
 // Constants
-const MOVE_OVERHEAD: Duration = Duration::from_millis(100);
-const MAX_LEGAL_MOVES: usize = 256;
-const POLICY_SIZE: usize = 5312; // Total number of possible moves including promotions
+const DEFAULT_NUM_SIMULATIONS: u32 = 1000;
+const DEFAULT_TEMPERATURE: f32 = 1.0;
+const DEFAULT_C_PUCT: f32 = 1.0;
+const DEFAULT_DIRICHLET_ALPHA: f32 = 0.3;
+const DEFAULT_DIRICHLET_WEIGHT: f32 = 0.25;
+const DEFAULT_REPETITION_PENALTY: f32 = 0.1;
+const DEFAULT_FORWARD_PROGRESS_BONUS: f32 = 0.01;
+const DEFAULT_RANDOM_COMPONENT_STD: f32 = 0.1;
+const DEFAULT_MIN_PIECES_FOR_REPETITION: u32 = 7;
+const DEFAULT_REPETITION_HISTORY_SIZE: u32 = 8;
+const DEFAULT_REPETITION_THRESHOLD: u32 = 3;
+const DEFAULT_NUM_THREADS: u32 = 1;
+const DEFAULT_BATCH_SIZE: u32 = 1;
+const VIRTUAL_LOSS: u32 = 3; // Virtual loss for parallel MCTS
 
 #[derive(Debug, Clone)]
 pub struct MCTSConfig {
     pub num_simulations: u32,
+    pub temperature: f32,
     pub c_puct: f32,
     pub dirichlet_alpha: f32,
     pub dirichlet_weight: f32,
-    pub temperature: f32,
-    pub batch_size: usize,
-    pub max_batch_size: usize,
-    pub max_parallel_searches: usize,
-    pub max_depth: u32,
-    pub max_time: Duration,
-    pub cache_size: usize,
+    pub repetition_penalty: f32,
+    pub forward_progress_bonus: f32,
+    pub random_component_std: f32,
+    pub min_pieces_for_repetition: u32,
+    pub repetition_history_size: u32,
+    pub repetition_threshold: u32,
+    pub num_threads: u32,
+    pub batch_size: u32,
+    pub use_virtual_loss: bool,
 }
 
 impl Default for MCTSConfig {
     fn default() -> Self {
         Self {
-            num_simulations: 800,
-            c_puct: 1.0,
-            dirichlet_alpha: 0.3,
-            dirichlet_weight: 0.25,
-            temperature: 1.0,
-            batch_size: 32,
-            max_batch_size: 256,
-            max_parallel_searches: 8,
-            max_depth: 100,
-            max_time: Duration::from_secs(1),
-            cache_size: 1_000_000,
+            num_simulations: DEFAULT_NUM_SIMULATIONS,
+            temperature: DEFAULT_TEMPERATURE,
+            c_puct: DEFAULT_C_PUCT,
+            dirichlet_alpha: DEFAULT_DIRICHLET_ALPHA,
+            dirichlet_weight: DEFAULT_DIRICHLET_WEIGHT,
+            repetition_penalty: DEFAULT_REPETITION_PENALTY,
+            forward_progress_bonus: DEFAULT_FORWARD_PROGRESS_BONUS,
+            random_component_std: DEFAULT_RANDOM_COMPONENT_STD,
+            min_pieces_for_repetition: DEFAULT_MIN_PIECES_FOR_REPETITION,
+            repetition_history_size: DEFAULT_REPETITION_HISTORY_SIZE,
+            repetition_threshold: DEFAULT_REPETITION_THRESHOLD,
+            num_threads: DEFAULT_NUM_THREADS,
+            batch_size: DEFAULT_BATCH_SIZE,
+            use_virtual_loss: true,
         }
     }
 }
 
-// Create a wrapper type for Board to implement Hash
-#[derive(Clone)]
-struct BoardHash(Board);
-
-impl Hash for BoardHash {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.get_hash().hash(state);
-    }
-}
-
-#[derive(Clone)]
 struct Node {
+    children: Mutex<HashMap<ChessMove, Arc<Node>>>,
+    visit_count: AtomicU32,
+    virtual_loss: AtomicU32,
+    value_sum: AtomicU32, // Store as integer to avoid floating point atomic issues
     prior: f32,
-    visit_count: u32,
-    value_sum: f32,
-    children: HashMap<ChessMove, Node>,
-    is_expanded: bool,
-    position_count: u32,  // Track how many times this position has occurred
+    is_expanded: AtomicBool,
 }
 
 impl Node {
     fn new(prior: f32) -> Self {
         Self {
+            children: Mutex::new(HashMap::new()),
+            visit_count: AtomicU32::new(0),
+            virtual_loss: AtomicU32::new(0),
+            value_sum: AtomicU32::new(0),
             prior,
-            visit_count: 0,
-            value_sum: 0.0,
-            children: HashMap::new(),
-            is_expanded: false,
-            position_count: 1,  // Initialize to 1 since this is the first occurrence
+            is_expanded: AtomicBool::new(false),
         }
     }
 
-    fn value(&self) -> f32 {
-        if self.visit_count == 0 {
-            0.0
-        } else {
-            // Apply repetition penalty
-            let repetition_penalty = if self.position_count > 1 {
-                -0.1 * (self.position_count - 1) as f32  // Penalize repeated positions
-            } else {
-                0.0
-            };
-            self.value_sum / self.visit_count as f32 + repetition_penalty
+    fn get_value(&self) -> f32 {
+        let visits = self.visit_count.load(AtomicOrdering::Relaxed);
+        if visits == 0 {
+            return 0.0;
         }
+        let value_sum = self.value_sum.load(AtomicOrdering::Relaxed);
+        f32::from_bits(value_sum) / visits as f32
     }
 
-    fn expand(&mut self, moves: &[(ChessMove, f32)]) {
-        self.is_expanded = true;
-        for &(mv, prior) in moves {
-            self.children.insert(mv, Node::new(prior));
+    fn add_virtual_loss(&self) {
+        self.virtual_loss.fetch_add(VIRTUAL_LOSS, AtomicOrdering::Relaxed);
+    }
+
+    fn remove_virtual_loss(&self) {
+        self.virtual_loss.fetch_sub(VIRTUAL_LOSS, AtomicOrdering::Relaxed);
+    }
+
+    fn get_ucb_score(&self, parent_visit_sqrt: f32, c_puct: f32) -> f32 {
+        let visits = self.visit_count.load(AtomicOrdering::Relaxed) as f32;
+        let virtual_loss = self.virtual_loss.load(AtomicOrdering::Relaxed) as f32;
+        
+        if visits + virtual_loss == 0.0 {
+            return f32::INFINITY;
         }
+
+        let q_value = -self.get_value();
+        let u_value = c_puct * self.prior * parent_visit_sqrt / (1.0 + visits + virtual_loss);
+        
+        q_value + u_value
+    }
+
+    fn select_child(&self, config: &MCTSConfig) -> Option<(ChessMove, Arc<Node>)> {
+        if self.children.lock().unwrap().is_empty() {
+            return None;
+        }
+
+        let parent_visit_sqrt = (self.visit_count.load(AtomicOrdering::Relaxed) as f32).sqrt();
+
+        self.children.lock().unwrap().iter()
+            .max_by(|(_, a), (_, b)| {
+                let a_score = a.get_ucb_score(parent_visit_sqrt, config.c_puct);
+                let b_score = b.get_ucb_score(parent_visit_sqrt, config.c_puct);
+                a_score.partial_cmp(&b_score).unwrap_or(Ordering::Equal)
+            })
+            .map(|(mv, node)| (*mv, Arc::clone(node)))
+    }
+
+    fn backup(&self, value: f32) {
+        self.visit_count.fetch_add(1, AtomicOrdering::Relaxed);
+        // Convert value to integer for atomic operations
+        let value_int = (value * 1000.0) as u32;
+        self.value_sum.fetch_add(value_int, AtomicOrdering::Relaxed);
     }
 
     fn get_policy(&self, temperature: f32) -> HashMap<ChessMove, f32> {
-        if self.children.is_empty() {
+        if self.children.lock().unwrap().is_empty() {
             return HashMap::new();
         }
 
         let mut policy = HashMap::new();
-        let total_visits: f32 = self.children.values()
-            .map(|child| child.visit_count as f32)
-            .sum();
+        let visits: Vec<_> = self.children.lock().unwrap().iter()
+            .map(|(mv, node)| (*mv, node.visit_count.load(AtomicOrdering::Relaxed) as f32))
+            .collect();
 
-        if total_visits == 0.0 {
-            let prob = 1.0 / self.children.len() as f32;
-            for mv in self.children.keys() {
-                policy.insert(*mv, prob);
-            }
-            return policy;
-        }
-
-        // Apply temperature
-        if temperature == 0.0 {
-            let best_move = self.children.iter()
-                .max_by_key(|(_, child)| child.visit_count)
+        if temperature <= 0.01 {
+            // Use deterministic selection
+            let best_move = visits.iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
                 .map(|(mv, _)| *mv)
                 .unwrap();
             policy.insert(best_move, 1.0);
         } else {
-            for (mv, child) in &self.children {
-                let count = child.visit_count as f32;
-                let prob = (count / temperature).exp();
-                policy.insert(*mv, prob);
+            // Use temperature-based selection
+            let mut sum = 0.0;
+            for (mv, visits) in visits {
+                let prob = (visits / temperature).exp();
+                policy.insert(mv, prob);
+                sum += prob;
             }
-            
-            let sum: f32 = policy.values().sum();
-            for prob in policy.values_mut() {
-                *prob /= sum;
+
+            // Normalize probabilities
+            if sum > 0.0 {
+                for prob in policy.values_mut() {
+                    *prob /= sum;
+                }
+            } else {
+                // Fallback to uniform distribution
+                let uniform_prob = 1.0 / self.children.lock().unwrap().len() as f32;
+                for prob in policy.values_mut() {
+                    *prob = uniform_prob;
+                }
             }
         }
 
@@ -149,8 +188,7 @@ impl Node {
 pub struct MCTS {
     config: MCTSConfig,
     model: ModelBridge,
-    cache: RwLock<HashMap<u64, (Tensor, f32)>>, // Maps board hash to (policy, value)
-    nodes: RwLock<HashMap<u64, Node>>,
+    rng: Mutex<StdRng>, // Only keep RNG for move selection
 }
 
 impl MCTS {
@@ -158,45 +196,89 @@ impl MCTS {
         Self {
             config,
             model,
-            cache: RwLock::new(HashMap::new()),
-            nodes: RwLock::new(HashMap::new()),
+            rng: Mutex::new(StdRng::from_entropy()),
         }
     }
 
     pub fn get_best_move(&mut self, board: &Board, temperature: Option<f32>) -> Result<ChessMove> {
         let policy = self.search(board)?;
-        let temp = temperature.unwrap_or(self.config.temperature);
         
         if policy.is_empty() {
             return Err(anyhow::anyhow!("No legal moves available"));
         }
         
-        if temp == 0.0 {
-            // Deterministic selection - choose highest probability move
-            Ok(*policy.iter()
-                .max_by(|(_, &a), (_, &b)| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(mv, _)| mv)
-                .unwrap())
+        let temp = temperature.unwrap_or(self.config.temperature);
+        let mut rng = self.rng.lock().map_err(|e| anyhow::anyhow!("Failed to acquire RNG lock: {}", e))?;
+        
+        if temp <= 0.01 {
+            // Deterministic selection
+            let best_move = policy.iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+                .map(|(mv, _)| *mv)
+                .unwrap();
+            Ok(best_move)
         } else {
-            // Sample move based on probabilities
-            let moves: Vec<_> = policy.keys().collect();
-            let probs: Vec<_> = policy.values().map(|&p| (p / temp).exp()).collect();
-            let sum: f32 = probs.iter().sum();
-            let normalized: Vec<_> = probs.iter().map(|&p| p / sum).collect();
+            // Temperature-based selection
+            let moves: Vec<_> = policy.into_iter().collect();
+            let total_prob: f32 = moves.iter().map(|(_, prob)| prob).sum();
             
-            let mut rng = thread_rng();
+            if total_prob <= 0.0 {
+                return Err(anyhow::anyhow!("Invalid policy probabilities"));
+            }
+            
             let mut cumsum = 0.0;
-            let r = rng.gen::<f32>();
+            let rand_val: f32 = rng.gen();
             
-            for (i, &p) in normalized.iter().enumerate() {
-                cumsum += p;
-                if r <= cumsum {
-                    return Ok(*moves[i]);
+            for (mv, prob) in &moves {
+                cumsum += prob / total_prob;
+                if rand_val <= cumsum {
+                    return Ok(*mv);
                 }
             }
             
-            // Fallback to highest probability move
-            Ok(*moves[0])
+            // Fallback to first move
+            Ok(moves[0].0)
+        }
+    }
+
+    pub fn get_best_move_with_time(&mut self, board: &Board, time_limit: Duration, temperature: Option<f32>) -> Result<ChessMove> {
+        let policy = self.search_with_time(board, time_limit)?;
+        
+        if policy.is_empty() {
+            return Err(anyhow::anyhow!("No legal moves available"));
+        }
+        
+        let temp = temperature.unwrap_or(self.config.temperature);
+        let mut rng = self.rng.lock().map_err(|e| anyhow::anyhow!("Failed to acquire RNG lock: {}", e))?;
+        
+        if temp <= 0.01 {
+            // Deterministic selection
+            let best_move = policy.iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+                .map(|(mv, _)| *mv)
+                .unwrap();
+            Ok(best_move)
+        } else {
+            // Temperature-based selection
+            let moves: Vec<_> = policy.into_iter().collect();
+            let total_prob: f32 = moves.iter().map(|(_, prob)| prob).sum();
+            
+            if total_prob <= 0.0 {
+                return Err(anyhow::anyhow!("Invalid policy probabilities"));
+            }
+            
+            let mut cumsum = 0.0;
+            let rand_val: f32 = rng.gen();
+            
+            for (mv, prob) in &moves {
+                cumsum += prob / total_prob;
+                if rand_val <= cumsum {
+                    return Ok(*mv);
+                }
+            }
+            
+            // Fallback to first move
+            Ok(moves[0].0)
         }
     }
     
@@ -208,7 +290,7 @@ impl MCTS {
     pub fn get_principal_variation(&mut self, board: &Board, max_depth: Option<u32>) -> Result<Vec<ChessMove>> {
         let mut pv = Vec::new();
         let mut current_board = board.clone();
-        let depth = max_depth.unwrap_or(self.config.max_depth);
+        let depth = max_depth.unwrap_or(self.config.num_simulations);
         
         for _ in 0..depth {
             if current_board.status() != chess::BoardStatus::Ongoing {
@@ -226,7 +308,7 @@ impl MCTS {
                 .unwrap();
             
             pv.push(best_move);
-            let mut new_board = current_board.clone();
+            let mut new_board = Board::default();
             current_board.make_move(best_move, &mut new_board);
             current_board = new_board;
         }
@@ -234,245 +316,164 @@ impl MCTS {
         Ok(pv)
     }
     
-    pub fn get_node_info(&self, board: &Board) -> Result<NodeInfo> {
-        let hash = board.get_hash();
-        if let Some(node) = self.nodes.read().get(&hash) {
-            Ok(NodeInfo {
-                visit_count: node.visit_count,
-                value: node.value(),
-                is_expanded: node.is_expanded,
-                children_info: node.children.iter()
-                    .map(|(mv, child)| (
-                        *mv,
-                        ChildInfo {
-                            prior: child.prior,
-                            visit_count: child.visit_count,
-                            value: child.value(),
-                        }
-                    ))
-                    .collect(),
-            })
-        } else {
-            Err(anyhow::anyhow!("Node not found"))
-        }
-    }
-    
-    pub fn clear_cache(&mut self) {
-        self.cache.write().clear();
-        self.nodes.write().clear();
-    }
-    
-    pub fn get_cache_stats(&self) -> CacheStats {
-        let cache = self.cache.read();
-        let nodes = self.nodes.read();
-        
-        CacheStats {
-            evaluation_cache_size: cache.len(),
-            node_cache_size: nodes.len(),
-            memory_usage: (cache.len() + nodes.len()) * std::mem::size_of::<Node>(),
-        }
-    }
-
     pub fn search(&mut self, board: &Board) -> Result<HashMap<ChessMove, f32>> {
-        let start_time = Instant::now();
-        let root_hash = board.get_hash();
-        
-        // Initialize root node if not exists
-        if !self.nodes.read().contains_key(&root_hash) {
-            let (_policy, _value) = self.evaluate_position(board)?;
-            let mut moves = Vec::new();
-            
-            for mv in MoveGen::new_legal(board) {
-                let idx = self.move_to_index(&mv);
-                if let Some(idx) = idx {
-                    let prior = _policy.double_value(&[idx as i64]);
-                    moves.push((mv, prior as f32));
-                }
-            }
-            
-            // Create root node
-            let mut root = Node::new(0.0); // Prior doesn't matter for root
-            root.expand(&moves);
-            
-            // Apply Dirichlet noise to root node
-            if self.config.dirichlet_weight > 0.0 {
-                let noise = self.generate_dirichlet_noise(moves.len());
-                let mut moves_mut: Vec<(ChessMove, f32)> = moves.clone();
-                for (j, (_, prior)) in moves_mut.iter_mut().enumerate() {
-                    *prior = (1.0 - self.config.dirichlet_weight) * *prior + 
-                            self.config.dirichlet_weight * noise[j];
-                }
-                root.expand(&moves_mut);
-            }
-            
-            self.nodes.write().insert(root_hash, root);
-        }
+        let root = Arc::new(Node::new(0.0));
         
         // Run simulations
         for _ in 0..self.config.num_simulations {
-            if start_time.elapsed() > self.config.max_time {
+            self.run_simulation(board, Arc::clone(&root))?;
+        }
+        
+        // Get policy from root node
+        let temperature = self.config.temperature;
+        Ok(root.get_policy(temperature))
+    }
+
+    pub fn search_with_time(&mut self, board: &Board, time_limit: Duration) -> Result<HashMap<ChessMove, f32>> {
+        let root = Arc::new(Node::new(0.0));
+        let start_time = Instant::now();
+        let mut simulation_count = 0;
+        
+        // Run simulations until time limit is reached
+        while start_time.elapsed() < time_limit {
+            self.run_simulation(board, Arc::clone(&root))?;
+            simulation_count += 1;
+            
+            // Safety check to prevent infinite loops
+            if simulation_count > 100_000 {
                 break;
             }
-            
-            let mut path = Vec::new();
-            let mut current_board = board.clone();
-            let mut current_hash = root_hash;
-            
-            // Selection phase
-            while let Some(node) = self.nodes.read().get(&current_hash) {
-                if !node.is_expanded {
-                    break;
-                }
-                
-                // Find best child according to PUCT formula
-                let mut best_score = f32::NEG_INFINITY;
-                let mut best_move = None;
-                let parent_visits = (node.visit_count as f32).sqrt();
-                
-                for (mv, child) in &node.children {
-                    let q_value = -child.value(); // Negamax
-                    let u_value = self.config.c_puct * child.prior * parent_visits / 
-                                (1.0 + child.visit_count as f32);
-                    let puct = q_value + u_value;
-                    
-                    if puct > best_score {
-                        best_score = puct;
-                        best_move = Some(*mv);
-                    }
-                }
-                
-                if let Some(mv) = best_move {
-                    path.push((current_hash, mv));
-                    let mut new_board = current_board.clone();
-                    current_board.make_move(mv, &mut new_board);
-                    current_board = new_board;
-                    current_hash = current_board.get_hash();
-                } else {
-                    break;
-                }
-            }
-            
-            // Expansion phase
-            let mut value = if current_board.status() == chess::BoardStatus::Ongoing {
-                let (_policy, node_value) = self.evaluate_position(&current_board)?;
-                let mut moves = Vec::new();
-                
-                for mv in MoveGen::new_legal(&current_board) {
-                    let idx = self.move_to_index(&mv);
-                    if let Some(idx) = idx {
-                        let prior = _policy.double_value(&[idx as i64]);
-                        moves.push((mv, prior as f32));
-                    }
-                }
-                
-                let mut root = Node::new(0.0);
-                let moves: Vec<(ChessMove, f32)> = moves.iter().map(|(mv, prior)| (*mv, *prior)).collect();
-                root.expand(&moves);
-                
-                // Update position count
-                if let Some(existing_node) = self.nodes.read().get(&current_hash) {
-                    root.position_count = existing_node.position_count + 1;
-                }
-                
-                self.nodes.write().insert(current_hash, root);
-                
-                node_value
-            } else {
-                // Game is over
-                match current_board.status() {
-                    chess::BoardStatus::Checkmate => -1.0,
-                    _ => 0.0, // Draw
-                }
-            };
-            
-            // Backpropagation phase
-            for (hash, _) in path.iter().rev() {
-                if let Some(node) = self.nodes.write().get_mut(hash) {
-                    node.visit_count += 1;
-                    node.value_sum += value;
-                    value = -value; // Negamax
-                }
-            }
         }
         
-        // Return normalized visit counts as policy
-        if let Some(root) = self.nodes.read().get(&root_hash) {
-            Ok(root.get_policy(self.config.temperature))
-        } else {
-            Ok(HashMap::new())
-        }
+        println!("MCTS completed {} simulations in {:?}", simulation_count, start_time.elapsed());
+        
+        // Get policy from root node
+        let temperature = self.config.temperature;
+        Ok(root.get_policy(temperature))
     }
-    
-    fn evaluate_position(&self, board: &Board) -> Result<(Tensor, f32)> {
-        let hash = board.get_hash();
-        let cached_result = self.cache.read().get(&hash).map(|(policy, value)| (policy.shallow_clone(), *value));
-        
-        // Check for repetition
-        let position_count = if let Some(node) = self.nodes.read().get(&hash) {
-            node.position_count
+
+    fn run_simulation(&self, board: &Board, root: Arc<Node>) -> Result<()> {
+        let mut current_board = board.clone();
+        let mut current_node = root;
+        let mut path = vec![];
+
+        // Selection phase
+        while current_node.is_expanded.load(AtomicOrdering::Relaxed) && !self.is_terminal(&current_board) {
+            let (selected_move, selected_node) = match current_node.select_child(&self.config) {
+                Some((mv, node)) => (mv, node),
+                None => break,
+            };
+
+            if self.config.use_virtual_loss {
+                selected_node.add_virtual_loss();
+            }
+
+            path.push((selected_move, Arc::clone(&selected_node)));
+            let mut next_board = Board::default();
+            current_board.make_move(selected_move, &mut next_board);
+            current_board = next_board;
+            current_node = selected_node;
+        }
+
+        // Expansion and evaluation
+        let value = if self.is_terminal(&current_board) {
+            self.get_terminal_value(&current_board)
+        } else if !current_node.is_expanded.load(AtomicOrdering::Relaxed) {
+            let (policy, value) = self.evaluate_position(&current_board)?;
+            let moves = self.get_legal_moves_with_probabilities(&current_board, &policy);
+            
+            // Expand the node using interior mutability
+            {
+                let mut children = current_node.children.lock().unwrap();
+                for (mv, prior) in &moves {
+                    children.insert(*mv, Arc::new(Node::new(*prior)));
+                }
+            }
+            current_node.is_expanded.store(true, AtomicOrdering::Relaxed);
+            current_node.visit_count.fetch_add(1, AtomicOrdering::Relaxed);
+            value
         } else {
-            1
+            0.0 // Should not happen
         };
 
-        if let Some((policy, mut value)) = cached_result {
-            // Apply repetition penalty to cached value
-            if position_count > 1 {
-                value -= 0.1 * (position_count - 1) as f32;
+        // Backpropagation
+        for (_, node) in path.iter().rev() {
+            if self.config.use_virtual_loss {
+                node.remove_virtual_loss();
             }
-            return Ok((policy, value));
+            node.backup(value);
         }
-        
-        let _pag = PAGBoard::from_board(board);
-        let (policy_vec, mut value) = self.model.predict_with_board(board.to_string())?;
-        
-        // Apply repetition penalty
-        if position_count > 1 {
-            value -= 0.1 * (position_count - 1) as f32;
-        }
-        
-        // Add forward progress bonus in opening
-        if board.fullmove_number() <= 10 {
-            let mut forward_progress = 0.0;
-            for rank in 0..8 {
-                for file in 0..8 {
-                    let square = chess::Square::make_square(
-                        chess::Rank::from_index(rank),
-                        chess::File::from_index(file)
-                    );
-                    if let Some(piece) = board.piece_on(square) {
-                        if piece == chess::Piece::Pawn {
-                            let progress = match board.color_on(square) {
-                                Some(chess::Color::White) => rank as f32 / 7.0,  // Progress towards rank 8
-                                Some(chess::Color::Black) => (7 - rank) as f32 / 7.0,  // Progress towards rank 1
-                                None => 0.0,
-                            };
-                            forward_progress += progress * 0.05;  // Small bonus for pawn advancement
-                        }
-                    }
+
+        Ok(())
+    }
+
+    fn get_terminal_value(&self, board: &Board) -> f32 {
+        match board.status() {
+            BoardStatus::Checkmate => {
+                if board.side_to_move() == Color::White {
+                    -1.0 // Black wins
+                } else {
+                    1.0 // White wins
                 }
             }
-            value += forward_progress;
+            _ => 0.0 // Draw
         }
-        
-        // Convert policy vector to tensor
-        let policy = Tensor::from_slice(&policy_vec);
-        
-        self.cache.write().insert(hash, (policy.shallow_clone(), value));
-        
-        if self.cache.read().len() > self.config.cache_size {
-            let keys: Vec<_> = self.cache.read().keys().copied().collect();
-            let to_remove = keys.len() - self.config.cache_size;
-            for key in keys.iter().take(to_remove) {
-                self.cache.write().remove(key);
+    }
+
+    fn is_terminal(&self, board: &Board) -> bool {
+        board.status() != BoardStatus::Ongoing
+    }
+
+    fn get_legal_moves_with_probabilities(&self, board: &Board, policy: &Vec<f32>) -> Vec<(ChessMove, f32)> {
+        let mut moves = Vec::new();
+        let legal_moves: Vec<_> = MoveGen::new_legal(board).collect();
+        let policy_size = policy.len();
+        let policy_slice = &policy[0..policy_size];
+
+        for mv in legal_moves {
+            if let Some(idx) = self.move_to_index(&mv) {
+                // Ensure the index is within bounds
+                if idx < policy_size {
+                    moves.push((mv, policy_slice[idx]));
+                } else {
+                    // If index is out of bounds, use a small default probability
+                    moves.push((mv, 0.001));
+                }
+            } else {
+                // If move_to_index returns None, use a small default probability
+                moves.push((mv, 0.001));
             }
         }
+
+        // Normalize probabilities
+        let sum: f32 = moves.iter().map(|(_, p)| *p).sum();
+        if sum > 0.0 {
+            for (_, p) in &mut moves {
+                *p /= sum;
+            }
+        } else {
+            let uniform_prob = 1.0 / moves.len() as f32;
+            for (_, p) in &mut moves {
+                *p = uniform_prob;
+            }
+        }
+
+        moves
+    }
+
+    fn evaluate_position(&self, board: &Board) -> Result<(Vec<f32>, f32)> {
+        let _hash = board.get_hash();
+        
+        // Evaluate with model
+        let (policy_vec, value) = self.model.predict_with_board(board.to_string())?;
+        let policy: Vec<f32> = policy_vec.into_iter().collect();
         
         Ok((policy, value))
     }
     
     fn move_to_index(&self, mv: &ChessMove) -> Option<usize> {
-        let from = mv.get_source().to_index();
-        let to = mv.get_dest().to_index();
+        let from = mv.get_source().to_index() as usize;
+        let to = mv.get_dest().to_index() as usize;
         let promotion = mv.get_promotion();
         
         if let Some(promotion) = promotion {
@@ -486,326 +487,25 @@ impl MCTS {
                 _ => return None,
             };
             let base = 4096 + (from * 64 + to) * 4;
-            Some(base + piece_offset)
+            let index = base + piece_offset;
+            
+            // Ensure the index is within bounds
+            if index < 5312 {
+                Some(index)
+            } else {
+                None
+            }
         } else {
             // Regular moves are encoded as from * 64 + to
-            Some(from * 64 + to)
-        }
-    }
-    
-    fn generate_dirichlet_noise(&self, size: usize) -> Vec<f32> {
-        let alpha = vec![self.config.dirichlet_alpha; size];
-        let dirichlet = Dirichlet::new(&alpha).unwrap();
-        let mut rng = thread_rng();
-        dirichlet.sample(&mut rng)
-    }
-
-    pub fn search_batch(&mut self, boards: &[Board]) -> Result<Vec<HashMap<ChessMove, f32>>> {
-        let mut results = Vec::with_capacity(boards.len());
-        let mut batch = Vec::new();
-        let mut batch_indices = Vec::new();
-        
-        // Process each board
-        for (i, board) in boards.iter().enumerate() {
-            let hash = board.get_hash();
+            let index = from * 64 + to;
             
-            // Check cache first
-            let cached_policy = self.cache.read().get(&hash).map(|(policy, _)| policy.shallow_clone());
-            if let Some(_policy) = cached_policy {
-                // If in cache, we can skip evaluation
-                if let Some(root) = self.nodes.read().get(&hash) {
-                    results.push(root.get_policy(self.config.temperature));
-                } else {
-                    results.push(HashMap::new());
-                }
+            // Ensure the index is within bounds
+            if index < 4096 {
+                Some(index)
             } else {
-                // Add to batch for evaluation
-                batch.push(board.clone());
-                batch_indices.push(i);
-                
-                // Process batch if full
-                if batch.len() >= self.config.batch_size {
-                    self.process_batch(&batch, &mut results, &batch_indices)?;
-                    batch.clear();
-                    batch_indices.clear();
-                }
+                None
             }
         }
-        
-        // Process remaining boards
-        if !batch.is_empty() {
-            self.process_batch(&batch, &mut results, &batch_indices)?;
-        }
-        
-        Ok(results)
-    }
-    
-    fn process_batch(
-        &mut self,
-        batch: &[Board],
-        results: &mut Vec<HashMap<ChessMove, f32>>,
-        batch_indices: &[usize]
-    ) -> Result<()> {
-        // Process each board sequentially for now
-        for (i, board) in batch.iter().enumerate() {
-            let (policy, value) = self.model.predict_with_board(board.to_string())?;
-            let policy_tensor = Tensor::from_slice(&policy);
-            
-            let hash = board.get_hash();
-            self.cache.write().insert(hash, (policy_tensor.shallow_clone(), value));
-            
-            if !self.nodes.read().contains_key(&hash) {
-                let mut moves = Vec::new();
-                
-                for mv in MoveGen::new_legal(board) {
-                    let idx = self.move_to_index(&mv);
-                    if let Some(idx) = idx {
-                        let prior = if idx < policy.len() {
-                            policy[idx]
-                        } else {
-                            0.0
-                        };
-                        moves.push((mv, prior));
-                    }
-                }
-                
-                let mut root = Node::new(0.0);
-                let mut final_moves = moves.clone();
-                
-                if self.config.dirichlet_weight > 0.0 {
-                    let noise = self.generate_dirichlet_noise(moves.len());
-                    for (j, (_, prior)) in final_moves.iter_mut().enumerate() {
-                        *prior = (1.0 - self.config.dirichlet_weight) * *prior + 
-                                self.config.dirichlet_weight * noise[j];
-                    }
-                }
-                
-                root.expand(&final_moves);
-                
-                self.nodes.write().insert(hash, root);
-            }
-            
-            let policy_result = self.search(board)?;
-            
-            let result_idx = batch_indices[i];
-            while results.len() <= result_idx {
-                results.push(HashMap::new());
-            }
-            results[result_idx] = policy_result;
-        }
-        
-        Ok(())
-    }
-    
-    pub fn evaluate_batch(&self, boards: &[Board]) -> Result<Vec<(Tensor, f32)>> {
-        let mut results = Vec::with_capacity(boards.len());
-        let mut batch = Vec::new();
-        let mut batch_indices = Vec::new();
-        
-        // Process each board
-        for (i, board) in boards.iter().enumerate() {
-            let hash = board.get_hash();
-            
-            // Check cache first
-            let cached_result = self.cache.read().get(&hash).map(|(policy, value)| (policy.shallow_clone(), *value));
-            if let Some((policy, value)) = cached_result {
-                results.push((policy, value));
-            } else {
-                // Add to batch for evaluation
-                batch.push(board.clone());
-                batch_indices.push(i);
-                
-                // Process batch if full
-                if batch.len() >= self.config.batch_size {
-                    let boards_vec: Vec<String> = batch.iter().map(|b| b.to_string()).collect();
-                    let (policies, values) = self.model.predict_batch(boards_vec)?;
-                    
-                    // Cache and store results
-                    for ((board, policy), value) in batch.iter().zip(policies).zip(values) {
-                        let hash = board.get_hash();
-                        let policy_tensor = Tensor::from_slice(&policy);
-                        self.cache.write().insert(hash, (policy_tensor.shallow_clone(), value));
-                        results.push((policy_tensor, value));
-                    }
-                    
-                    batch.clear();
-                    batch_indices.clear();
-                }
-            }
-        }
-        
-        // Process remaining boards
-        if !batch.is_empty() {
-            let boards_vec: Vec<String> = batch.iter().map(|b| b.to_string()).collect();
-            let (policies, values) = self.model.predict_batch(boards_vec)?;
-            
-            // Cache and store results
-            for ((board, policy), value) in batch.iter().zip(policies).zip(values) {
-                let hash = board.get_hash();
-                let policy_tensor = Tensor::from_slice(&policy);
-                self.cache.write().insert(hash, (policy_tensor.shallow_clone(), value));
-                results.push((policy_tensor, value));
-            }
-        }
-        
-        Ok(results)
-    }
-
-    pub fn search_parallel(&self, board: &Board) -> Result<HashMap<ChessMove, f32>> {
-        let start_time = Arc::new(Instant::now());
-        let root_hash = board.get_hash();
-        
-        // Initialize root node if not exists
-        if !self.nodes.read().contains_key(&root_hash) {
-            let (policy_vec, value) = self.model.predict()?;
-            let policy = Tensor::from_slice(&policy_vec);
-            let mut moves = Vec::new();
-            
-            for mv in MoveGen::new_legal(board) {
-                let idx = self.move_to_index(&mv);
-                if let Some(idx) = idx {
-                    let prior = policy_vec[idx];
-                    moves.push((mv, prior));
-                }
-            }
-            
-            let mut root = Node::new(0.0);
-            let mut final_moves = moves.clone();
-            
-            if self.config.dirichlet_weight > 0.0 {
-                let noise = self.generate_dirichlet_noise(moves.len());
-                for (i, (_, prior)) in final_moves.iter_mut().enumerate() {
-                    *prior = (1.0 - self.config.dirichlet_weight) * *prior + 
-                            self.config.dirichlet_weight * noise[i];
-                }
-            }
-            
-            root.expand(&final_moves);
-            
-            self.nodes.write().insert(root_hash, root);
-            self.cache.write().insert(root_hash, (policy, value));
-        }
-        
-        // Create thread-safe simulation counter
-        let simulation_count = Arc::new(parking_lot::Mutex::new(0u32));
-        let max_time = self.config.max_time;
-        
-        // Run parallel simulations
-        (0..self.config.num_simulations).into_par_iter().for_each(|_| {
-            // Check termination conditions
-            if start_time.elapsed() > max_time {
-                return;
-            }
-            
-            let mut path = Vec::new();
-            let mut current_board = board.clone();
-            let mut current_hash = root_hash;
-            
-            // Selection phase
-            while let Some(node) = self.nodes.read().get(&current_hash) {
-                if !node.is_expanded {
-                    break;
-                }
-                
-                let mut best_score = f32::NEG_INFINITY;
-                let mut best_move = None;
-                let parent_visits = (node.visit_count as f32).sqrt();
-                
-                for (mv, child) in &node.children {
-                    let q_value = -child.value();
-                    let u_value = self.config.c_puct * child.prior * parent_visits / 
-                                (1.0 + child.visit_count as f32);
-                    let puct = q_value + u_value;
-                    
-                    if puct > best_score {
-                        best_score = puct;
-                        best_move = Some(*mv);
-                    }
-                }
-                
-                if let Some(mv) = best_move {
-                    path.push((current_hash, mv));
-                    let mut new_board = current_board.clone();
-                    current_board.make_move(mv, &mut new_board);
-                    current_board = new_board;
-                    current_hash = current_board.get_hash();
-                } else {
-                    break;
-                }
-            }
-            
-            // Expansion phase
-            let mut value = if current_board.status() == chess::BoardStatus::Ongoing {
-                if let Ok((policy_vec, node_value)) = self.model.predict() {
-                    let policy = Tensor::from_slice(&policy_vec);
-                    let mut moves = Vec::new();
-                    
-                    for mv in MoveGen::new_legal(&current_board) {
-                        let idx = self.move_to_index(&mv);
-                        if let Some(idx) = idx {
-                            let prior = policy_vec[idx];
-                            moves.push((mv, prior));
-                        }
-                    }
-                    
-                    let mut root = Node::new(0.0);
-                    let moves: Vec<(ChessMove, f32)> = moves.iter().map(|(mv, prior)| (*mv, *prior)).collect();
-                    root.expand(&moves);
-                    
-                    let hash = current_board.get_hash();
-                    self.nodes.write().insert(hash, root);
-                    self.cache.write().insert(hash, (policy.shallow_clone(), node_value));
-                    
-                    node_value
-                } else {
-                    0.0 // Fallback value if evaluation fails
-                }
-            } else {
-                match current_board.status() {
-                    chess::BoardStatus::Checkmate => -1.0,
-                    _ => 0.0,
-                }
-            };
-            
-            // Backpropagation phase
-            for (hash, _) in path.iter().rev() {
-                if let Some(node) = self.nodes.write().get_mut(hash) {
-                    node.visit_count += 1;
-                    node.value_sum += value;
-                    value = -value;
-                }
-            }
-            
-            // Increment simulation count
-            *simulation_count.lock() += 1;
-        });
-        
-        // Return normalized visit counts as policy
-        if let Some(root) = self.nodes.read().get(&root_hash) {
-            Ok(root.get_policy(self.config.temperature))
-        } else {
-            Ok(HashMap::new())
-        }
-    }
-    
-    pub fn search_batch_parallel(&mut self, boards: &[Board]) -> Result<Vec<HashMap<ChessMove, f32>>> {
-        let chunk_size = 8;
-        let results: Vec<_> = boards
-            .chunks(chunk_size)
-            .map(|chunk| {
-                let mut local_results = Vec::with_capacity(chunk.len());
-                for board in chunk {
-                    if let Ok(moves) = self.search(board) {
-                        local_results.push(moves);
-                    } else {
-                        local_results.push(HashMap::new());
-                    }
-                }
-                local_results
-            })
-            .flatten()
-            .collect();
-        Ok(results)
     }
 }
 
@@ -822,13 +522,6 @@ pub struct ChildInfo {
     pub prior: f32,
     pub visit_count: u32,
     pub value: f32,
-}
-
-#[derive(Debug)]
-pub struct CacheStats {
-    pub evaluation_cache_size: usize,
-    pub node_cache_size: usize,
-    pub memory_usage: usize,
 }
 
 // Implement Send and Sync for MCTS
@@ -855,76 +548,6 @@ mod tests {
         let idx = mcts.move_to_index(&mv);
         assert!(idx.is_some());
         assert!(idx.unwrap() >= 4096); // Promotion moves start at index 4096
-    }
-    
-    #[test]
-    fn test_dirichlet_noise() {
-        let mcts = MCTS::new(ModelBridge::new(Board::default(), None), MCTSConfig::default());
-        let noise = mcts.generate_dirichlet_noise(10);
-        
-        assert_eq!(noise.len(), 10);
-        let sum: f32 = noise.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-6);
-        assert!(noise.iter().all(|&x| x >= 0.0 && x <= 1.0));
-    }
-    
-    #[test]
-    fn test_batch_evaluation() {
-        let mcts = MCTS::new(ModelBridge::new(Board::default(), None), MCTSConfig::default());
-        let boards = vec![Board::default(); 3];
-        
-        let results = mcts.evaluate_batch(&boards).unwrap();
-        assert_eq!(results.len(), 3);
-        
-        // Check that results are cached
-        let cached_results = mcts.evaluate_batch(&boards).unwrap();
-        assert_eq!(cached_results.len(), 3);
-        
-        // Verify cache hit rate
-        assert_eq!(mcts.cache.read().len(), 1); // Only one unique position
-    }
-    
-    #[test]
-    fn test_batch_search() {
-        let mcts = MCTS::new(ModelBridge::new(Board::default(), None), MCTSConfig::default());
-        let boards = vec![Board::default(); 3];
-        
-        let results = mcts.search_batch(&boards).unwrap();
-        assert_eq!(results.len(), 3);
-        
-        // Each result should be a valid policy
-        for policy in results {
-            assert!(!policy.is_empty());
-            let sum: f32 = policy.values().sum();
-            assert!((sum - 1.0).abs() < 1e-6);
-        }
-    }
-    
-    #[test]
-    fn test_parallel_search() {
-        let mcts = MCTS::new(ModelBridge::new(Board::default(), None), MCTSConfig::default());
-        let board = Board::default();
-        
-        let policy = mcts.search_parallel(&board).unwrap();
-        assert!(!policy.is_empty());
-        
-        let sum: f32 = policy.values().sum();
-        assert!((sum - 1.0).abs() < 1e-6);
-    }
-    
-    #[test]
-    fn test_parallel_batch_search() {
-        let mcts = MCTS::new(ModelBridge::new(Board::default(), None), MCTSConfig::default());
-        let boards = vec![Board::default(); 3];
-        
-        let results = mcts.search_batch_parallel(&boards).unwrap();
-        assert_eq!(results.len(), 3);
-        
-        for policy in results {
-            assert!(!policy.is_empty());
-            let sum: f32 = policy.values().sum();
-            assert!((sum - 1.0).abs() < 1e-6);
-        }
     }
     
     #[test]
@@ -961,23 +584,5 @@ mod tests {
             assert!(MoveGen::new_legal(&current_board).any(|m| m == mv));
             current_board.make_move(mv);
         }
-    }
-    
-    #[test]
-    fn test_cache_management() {
-        let mut mcts = MCTS::new(ModelBridge::new(Board::default(), None), MCTSConfig::default());
-        let board = Board::default();
-        
-        // Fill cache
-        mcts.search(&board).unwrap();
-        let stats = mcts.get_cache_stats();
-        assert!(stats.evaluation_cache_size > 0);
-        assert!(stats.node_cache_size > 0);
-        
-        // Clear cache
-        mcts.clear_cache();
-        let stats = mcts.get_cache_stats();
-        assert_eq!(stats.evaluation_cache_size, 0);
-        assert_eq!(stats.node_cache_size, 0);
     }
 } 

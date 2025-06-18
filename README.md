@@ -1,6 +1,6 @@
 # RivalAI Chess Engine
 
-A novel chess engine implementing the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions. CHESS transforms chess positions into rich graph structures that capture piece relationships, strategic importance, and positional dynamics.
+A novel chess engine implementing the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions. CHESS transforms chess positions into rich graph structures, known as Positional Adjacency Graphs (PAG), that capture piece relationships, strategic importance, and positional dynamics.
 
 ## Project Structure
 
@@ -20,6 +20,75 @@ rival_ai/
 ├── self_play_data/ # Generated self-play games
 └── logs/           # Training and runtime logs
 ```
+
+## Model Architecture
+
+The ChessGNN model uses a Graph Neural Network architecture to process chess positions represented as Positional Adjacency Graphs (PAG). Here's the complete architecture:
+
+```mermaid
+graph TD
+    subgraph Input
+        I1[Board Position] --> I2[Convert to Graph]
+        I2 --> P[Piece Nodes<br/>12 features]
+        I2 --> S[Square Nodes<br/>1 feature]
+    end
+
+    subgraph Embeddings
+        P --> PE[Piece Embedding<br/>256 dim]
+        S --> SE[Square Embedding<br/>256 dim]
+    end
+
+    subgraph GNN["Graph Neural Network (4 layers)"]
+        L1["Layer 1<br/>GAT Conv<br/>Piece → Square<br/>4 heads"] --> N1["LayerNorm + ReLU"]
+        N1 --> L2["Layer 2<br/>GAT Conv<br/>Square → Square<br/>4 heads"] --> N2["LayerNorm + ReLU"]
+        N2 --> L3["Layer 3<br/>GAT Conv<br/>Square → Square<br/>4 heads"] --> N3["LayerNorm + ReLU"]
+        N3 --> L4["Layer 4<br/>GAT Conv<br/>Square → Square<br/>4 heads"] --> N4["LayerNorm + ReLU"]
+    end
+
+    subgraph GlobalPool
+        N4 --> GP[Global Mean Pool]
+    end
+
+    subgraph Heads
+        GP --> PH["Policy Head<br/>Linear → ReLU → Linear<br/>Output: 5312"]
+        GP --> VH["Value Head<br/>Linear → ReLU → Linear → Tanh<br/>Output: 1"]
+    end
+
+    PE --> L1
+    SE --> L1
+```
+
+Key components:
+
+1. **Input Processing**:
+   - Takes a chess board position
+   - Converts it to a graph with piece nodes (12 features) and square nodes (1 feature)
+
+2. **Embeddings**:
+   - Piece nodes are embedded into 256 dimensions
+   - Square nodes are embedded into 256 dimensions
+
+3. **Graph Neural Network** (4 layers):
+   - First layer: Connects pieces to squares using Graph Attention (GAT) with 4 heads
+   - Next 3 layers: Square-to-square connections using GAT with 4 heads
+   - Each layer followed by LayerNorm and ReLU activation
+   - Dropout (0.1) applied after each layer
+
+4. **Global Pooling**:
+   - Global mean pooling over all square features
+
+5. **Output Heads**:
+   - Policy Head: Outputs move probabilities (5312 possible moves)
+     - Linear → ReLU → Dropout → Linear
+   - Value Head: Outputs position evaluation (-1 to 1)
+     - Linear → ReLU → Dropout → Linear → Tanh
+
+The architecture leverages several key features:
+- Graph Attention Networks (GAT) for message passing
+- Residual connections for better gradient flow
+- Multi-head attention (4 heads) for capturing different aspects of piece relationships
+- Separate policy and value heads for move selection and position evaluation
+- Dropout and layer normalization for regularization and training stability
 
 ## Setup Instructions
 
@@ -205,6 +274,12 @@ Then open your browser to `http://localhost:6006` to view:
 - [ ] Adaptive MCTS parameters
 - [ ] Advanced training techniques
 - [ ] Endgame tablebases
+
+## Model Learning Process Diagram
+
+- The model learning process has been diagrammed in Mermaid format. If present, see the project root for a `.mmd` file (e.g., `model_learning_flowchart.mmd`).
+- Aggressive anti-draw and anti-repetition penalties are implemented and tested in the training pipeline.
+- To export Mermaid diagrams to images, install Mermaid CLI (`npm install -g @mermaid-js/mermaid-cli`) and use the `mmdc` command. See MILESTONES.md for details.
 
 ## Development
 

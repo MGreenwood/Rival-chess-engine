@@ -1,7 +1,8 @@
 python-chess>=1.999
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
+--find-links https://download.pytorch.org/whl/torch_stable.html
+torch==2.1.0+cpu
+torchvision==0.16.0+cpu
+torchaudio==2.1.0+cpu
 torch-geometric>=2.3.0
 numpy>=1.21.0
 typing-extensions>=4.0.0
@@ -14,4 +15,13 @@ ruff>=0.1.0
 sphinx>=6.0.0
 sphinx-rtd-theme>=1.0.0
 # For type checking
-types-setuptools>=65.0.0 
+types-setuptools>=65.0.0
+# For visualization and logging
+matplotlib>=3.5.0
+seaborn>=0.12.0
+tensorboard>=2.12.0
+# For data processing
+pandas>=1.5.0
+scikit-learn>=1.0.0
+# For progress bars
+tqdm>=4.60.0 

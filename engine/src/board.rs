@@ -201,14 +201,14 @@ impl PAGBoard {
         &self.pag
     }
 
-    fn chess_to_pag_color(color: Color) -> PAGColor {
+    fn _chess_to_pag_color(color: Color) -> PAGColor {
         match color {
             Color::White => PAGColor::White,
             Color::Black => PAGColor::Black,
         }
     }
 
-    fn chess_to_pag_piece_type(piece: Piece) -> PieceType {
+    fn _chess_to_pag_piece_type(piece: Piece) -> PieceType {
         match piece {
             Piece::Pawn => PieceType::Pawn,
             Piece::Knight => PieceType::Knight,

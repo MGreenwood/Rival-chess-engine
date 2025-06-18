@@ -9,26 +9,38 @@ from datetime import datetime
 from typing import Optional, Union, TextIO
 from pathlib import Path
 
-def setup_logging(experiment_name: str, level: str = 'INFO') -> logging.Logger:
+def setup_logging(experiment_name: str, epoch: Optional[int] = None, level: str = 'INFO') -> logging.Logger:
     """Set up logging configuration.
     
     Args:
         experiment_name: Name of the experiment for log file naming
+        epoch: Current epoch number (optional)
         level: Logging level (default: 'INFO')
         
     Returns:
         Logger instance
     """
-    # Create logs directory if it doesn't exist
-    log_dir = Path('logs')
-    log_dir.mkdir(exist_ok=True)
+    # Create base logs directory if it doesn't exist
+    base_log_dir = Path('logs')
+    base_log_dir.mkdir(exist_ok=True)
     
-    # Create log filename with timestamp
+    # Create experiment-specific directory
+    experiment_log_dir = base_log_dir / experiment_name
+    experiment_log_dir.mkdir(exist_ok=True)
+    
+    # Create log filename with epoch and timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"{experiment_name}_{timestamp}.log"
+    if epoch is not None:
+        log_file = experiment_log_dir / f"epoch_{epoch:03d}-{timestamp}.log"
+    else:
+        log_file = experiment_log_dir / f"setup-{timestamp}.log"
+    
+    # Remove any existing handlers from root logger
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
     
     # Configure root logger
-    root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, level.upper()))
     
     # Create formatters

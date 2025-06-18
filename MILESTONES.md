@@ -128,6 +128,7 @@
 - [ ] Memory usage optimization
 - [ ] Code quality improvements
 - [x] Documentation updates
+- [x] Aggressive anti-draw and anti-repetition penalties implemented and tested
 
 ### Webapp Integration Goals
 - [ ] Move Explanation System
@@ -151,6 +152,10 @@
 - User satisfaction: > 4.5/5 rating for explanation quality
 - Strategic concept detection: > 85% accuracy
 - Graph relationship identification: > 90% accuracy
+
+## Documentation & Visualization
+- [x] Model learning process diagrammed (Mermaid source created in project root; image export optional)
+- [ ] Export Mermaid diagrams to images (optional, see README for instructions)
 
 ## Recent Achievements (December 2024)
 
