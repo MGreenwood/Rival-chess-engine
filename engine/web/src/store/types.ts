@@ -1,4 +1,4 @@
-import type { GameState } from '../types/chess';
+import type { GameStatus } from '../types/chess';
 
 export interface AnalysisResult {
   fen: string;
@@ -45,7 +45,6 @@ export interface UserPreferences {
   pieceStyle: string;
   boardTheme: string;
   soundEnabled: boolean;
-  theme?: string;
 }
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting';
@@ -82,75 +81,74 @@ export interface GameSettings {
 
 export interface GameRecord {
   id: string;
-  playerUsername: string;
-  playerColor: 'white' | 'black';
-  moves: number;
   result: 'win' | 'loss' | 'draw';
-  timestamp: string;  // ISO string timestamp
+  moves: string[];
+  timestamp: string;
 }
 
 export interface ModelStats {
-  totalGames: number;
-  createdAt: string;
-  currentEpoch: number;
-  nextTrainingAt: string | null;
-  winRate: number;
-  ratingHistory: number[];
-  recentGames: GameRecord[];
+  wins: number;
+  losses: number;
+  draws: number;
 }
 
 export interface LeaderboardEntry {
-  username: string;
-  rating: number;
+  rank: number;
+  name: string;
+  elo: number;
   wins: number;
   losses: number;
   draws: number;
 }
 
 export interface SavedGameData {
-  game_id: string;
+  id: string;
   moves: string[];
   result: string;
   timestamp: string;
-  player_color: string;
 }
 
-export interface AppState {
-  currentGame: {
-    game_id: string;
-    board: string;
-    status: string;
-    move_history: string[];
-    is_player_turn: boolean;
-  } | null;
-  loading: boolean;
-  gameHistory: GameRecord[];
-  modelStats: ModelStats;
-  leaderboard: LeaderboardEntry[];
-  preferences: UserPreferences;
-  theme: Theme;
-  connectionStatus: ConnectionStatus;
+export type GameMode = 'single' | 'community';
 
-  // UI actions
+export interface GameMetadata {
+  game_id: string;
+  mode: GameMode;
+  created_at: string;
+  last_move_at: string;
+  status: GameStatus;
+  total_moves: number;
+  player_color: string;
+  player_name: string | null;
+  engine_version: string;
+}
+
+export interface GameState {
+  metadata: GameMetadata;
+  board: string;
+  move_history: string[];
+  analysis?: Record<string, number>;
+  is_player_turn: boolean;
+  status: GameStatus;
+  game_id?: string;  // For backward compatibility with server responses
+}
+
+export interface StoreState {
+  currentGame: GameState | null;
+  loading: boolean;
+  recentGames: GameMetadata[];
+  theme: Theme;
+  preferences: UserPreferences;
+  modelStats: ModelStats | null;
+  leaderboard: LeaderboardEntry[];
+  gameActions: {
+    makeMove: (move: string) => Promise<void>;
+    startNewGame: (mode?: GameMode) => Promise<void>;
+    loadGame: (gameId: string, mode: GameMode) => Promise<void>;
+    deleteGame: (gameId: string, mode: GameMode) => Promise<void>;
+  };
   uiActions: {
     setTheme: (theme: Theme) => void;
     setPreferences: (prefs: Partial<UserPreferences>) => void;
   };
-
-  // Game actions
-  gameActions: {
-    startNewGame: (settings?: GameSettings) => Promise<void>;
-    makeMove: (move: string) => Promise<void>;
-    resetGame: () => Promise<void>;
-    undoMove: () => Promise<void>;
-    viewPosition: (moves: string) => Promise<void>;
-  };
-
-  // Game history actions
-  addGame: (game: GameRecord) => void;
-  updateModelStats: (stats: Partial<ModelStats>) => void;
-  updateLeaderboard: (entries: LeaderboardEntry[]) => void;
-
-  // Initialization
   init: () => Promise<void>;
 } 

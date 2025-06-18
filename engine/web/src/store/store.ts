@@ -1,22 +1,40 @@
 import { create } from 'zustand';
-import type { AppState, GameRecord, ModelStats, LeaderboardEntry, UserPreferences, Theme, SavedGameData } from './types';
+import type { Theme, UserPreferences, GameRecord, ModelStats, LeaderboardEntry, SavedGameData } from './types';
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:3000/api';
+const API_BASE_URL = 'http://localhost:3000';
 
-// Function to load saved games
-const loadSavedGames = async (): Promise<SavedGameData[]> => {
-  try {
-    const response = await axios.get(`${API_BASE_URL}/games`);
-    return response.data;
-  } catch (error) {
-    console.error('Failed to load saved games:', error);
-    return [];
-  }
-};
+export type GameMode = 'single' | 'community';
 
-const defaultTheme = {
-  mode: 'dark' as const,
+export interface GameMetadata {
+  game_id: string;
+  mode: GameMode;
+  created_at: string;
+  last_move_at: string;
+  status: string;
+  total_moves: number;
+  player_color: string;
+  player_name: string | null;
+  engine_version: string;
+}
+
+export interface GameState {
+  metadata: GameMetadata;
+  board: string;
+  move_history: string[];
+  analysis?: Record<string, number>;
+}
+
+export interface CommunityGameState {
+  metadata: GameMetadata;
+  board: string;
+  move_history: string[];
+  votes: Record<string, string[]>;
+  voting_ends_at: string | null;
+}
+
+const defaultTheme: Theme = {
+  mode: 'dark',
   colors: {
     primary: '#1a1b26',
     secondary: '#13141f',
@@ -33,225 +51,210 @@ const defaultPreferences: UserPreferences = {
   soundEnabled: true
 };
 
+interface StoreState {
+  currentGame: GameState | null;
+  loading: boolean;
+  recentGames: GameMetadata[];
+  theme: Theme;
+  preferences: UserPreferences;
+  modelStats: ModelStats | null;
+  leaderboard: LeaderboardEntry[];
+  gameActions: {
+    makeMove: (move: string) => Promise<void>;
+    startNewGame: (mode: GameMode) => Promise<void>;
+    loadGame: (gameId: string, mode: GameMode) => Promise<void>;
+    deleteGame: (gameId: string, mode: GameMode) => Promise<void>;
+  };
+  uiActions: {
+    setTheme: (theme: Theme) => void;
+    setPreferences: (prefs: Partial<UserPreferences>) => void;
+  };
+  init: () => Promise<void>;
+}
+
+// Function to load saved games
+const loadSavedGames = async (): Promise<SavedGameData[]> => {
+  try {
+    const response = await axios.get(`${API_BASE_URL}/games`);
+    return response.data;
+  } catch (error) {
+    console.error('Failed to load saved games:', error);
+    return [];
+  }
+};
+
 interface GameSettings {
   temperature?: number;
   strength?: number;
 }
 
-export const useStore = create<AppState>((set, get) => ({
-  // Initial state
+const useStore = create<StoreState>((set, get) => ({
   currentGame: null,
   loading: false,
-  gameHistory: [],
-  modelStats: {
-    totalGames: 0,
-    createdAt: new Date().toISOString(),
-    currentEpoch: 0,
-    nextTrainingAt: null,
-    winRate: 0,
-    ratingHistory: [],
-    recentGames: []
-  },
-  leaderboard: [],
-  preferences: defaultPreferences,
+  recentGames: [],
   theme: defaultTheme,
-  connectionStatus: 'disconnected',
+  preferences: defaultPreferences,
+  modelStats: null,
+  leaderboard: [],
 
-  // Initialize store with saved games
-  init: async () => {
-    const savedGames = await loadSavedGames();
-    if (savedGames.length > 0) {
-      // Find the oldest game by comparing timestamps
-      const oldestGame = savedGames.reduce((oldest, current) => {
-        return new Date(current.timestamp) < new Date(oldest.timestamp) ? current : oldest;
-      }, savedGames[0]);
-
-      // Get the 10 most recent games (sort by timestamp descending)
-      const sortedGames = [...savedGames].sort((a, b) => 
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      );
-      const recentGames = sortedGames.slice(0, 10).map((game: SavedGameData): GameRecord => ({
-        id: game.game_id,
-        playerUsername: 'Player',
-        playerColor: game.player_color as 'white' | 'black',
-        moves: game.moves.length,
-        result: game.result as 'win' | 'loss' | 'draw',
-        timestamp: game.timestamp
-      }));
-
-      set(state => ({
-        modelStats: {
-          ...state.modelStats,
-          totalGames: savedGames.length,
-          createdAt: oldestGame.timestamp,
-          recentGames,
-          winRate: calculateWinRate(recentGames)
-        }
-      }));
-    }
-  },
-
-  // UI actions
-  uiActions: {
-    setTheme: (theme: Theme) => set({ theme }),
-    setPreferences: (prefs: Partial<UserPreferences>) => set(state => ({
-      preferences: {
-        ...state.preferences,
-        ...prefs
-      }
-    }))
-  },
-
-  // Game actions
   gameActions: {
-    startNewGame: async (settings?: GameSettings) => {
-      try {
-        set({ loading: true });
-        // Extract only the needed settings
-        const gameSettings = settings ? {
-          temperature: settings.temperature,
-          strength: settings.strength
-        } : undefined;
-        
-        const response = await axios.post(`${API_BASE_URL}/game`, gameSettings);
-        set({ currentGame: response.data, loading: false });
-      } catch (error) {
-        console.error('\n Failed to start new game:', error);
-        set({ loading: false });
-        throw error;
-      }
-    },
-
     makeMove: async (move: string) => {
       const { currentGame } = get();
-      if (!currentGame?.game_id) return;
-
-      // Don't allow moves if the game is over
-      if (currentGame.status !== 'active') {
-        console.log('Game is already over:', currentGame.status);
-        return;
-      }
+      if (!currentGame) return;
 
       try {
-        set({ loading: true });
-        const response = await axios.post(
-          `${API_BASE_URL}/game/${currentGame.game_id}/move`,
-          { move_str: move }
-        );
-        
-        // If move failed, show error and return
-        if (!response.data.success) {
-          console.log('Move error:', response.data.error_message);
-          set({ loading: false });
-          throw new Error(response.data.error_message || 'Invalid move');
-        }
-
-        // Update state with successful move
-        set(state => ({
-          currentGame: {
-            ...state.currentGame!,
-            board: response.data.board,
-            status: response.data.status,
-            is_player_turn: response.data.is_player_turn,
-            move_history: [...(state.currentGame?.move_history || []), move]
-          },
-          loading: response.data.status === 'active' // Only keep loading if game is still active
-        }));
-
-        // If game is over after player's move, don't get engine move
-        if (response.data.status !== 'active') {
-          return;
-        }
-
-        // Get engine's move
-        const engineResponse = await axios.post(
-          `${API_BASE_URL}/game/${currentGame.game_id}/engine_move`
-        );
-
-        if (engineResponse.data.success) {
-          set(state => ({
-            currentGame: {
-              ...state.currentGame!,
-              board: engineResponse.data.board,
-              status: engineResponse.data.status,
-              is_player_turn: true,
-              move_history: engineResponse.data.engine_move 
-                ? [...(state.currentGame?.move_history || []), engineResponse.data.engine_move]
-                : state.currentGame?.move_history || []
-            },
-            loading: false
-          }));
-        } else {
-          set({ loading: false });
-          throw new Error('Engine failed to make a move');
-        }
-      } catch (error: any) {
-        console.error('Move error:', error);
-        set({ loading: false });
-        throw error;
-      }
-    },
-
-    resetGame: async () => {
-      const { currentGame } = get();
-      if (!currentGame?.game_id) return;
-
-      try {
-        set({ loading: true });
-        await axios.post(`${API_BASE_URL}/game/${currentGame.game_id}/reset`);
-        set({ currentGame: null, loading: false });
-      } catch (error) {
-        console.error('Failed to reset game:', error);
-        set({ loading: false });
-        throw error;
-      }
-    },
-
-    undoMove: async () => {
-      // TODO: Implement undo move functionality
-      console.warn('Undo move not implemented yet');
-    },
-
-    viewPosition: async (moves: string) => {
-      try {
-        const response = await axios.post(`${API_BASE_URL}/game/view`, { 
-          moves: moves.split(' ').filter(Boolean)  // Convert space-separated moves to array
+        const response = await axios.post(`${API_BASE_URL}/move/${currentGame.metadata.game_id}`, {
+          move_str: move,
+          board: currentGame.board,
+          player_color: currentGame.metadata.player_color,
         });
+
         if (response.data.success) {
-          set(state => ({
-            currentGame: {
-              ...state.currentGame!,
-              board: response.data.board,
-              is_player_turn: true,  // Allow moves when at latest position
-              current_position: moves // Track current position
-            }
-          }));
+          // Create a new game state from the response
+          const newGameState = {
+            ...currentGame,
+            board: response.data.board,
+            move_history: response.data.move_history,
+            is_player_turn: response.data.is_player_turn,
+            status: response.data.status
+          };
+          set({ currentGame: newGameState });
+          get().init(); // Refresh recent games list
+        } else if (response.data.error_message) {
+          throw new Error(response.data.error_message);
         }
       } catch (error) {
-        console.error('Failed to view position:', error);
+        console.error('Failed to make move:', error);
+        throw error;
       }
+    },
+
+    startNewGame: async (mode = 'single') => {
+      set({ loading: true });
+      try {
+        const response = await axios.post(`${API_BASE_URL}/${mode === 'community' ? 'community/start' : 'move/new'}`, {
+          player_color: 'white',
+        });
+
+        if (response.data) {
+          const newGameState: GameState = {
+            metadata: {
+              game_id: response.data.game_id,
+              mode,
+              created_at: new Date().toISOString(),
+              last_move_at: new Date().toISOString(),
+              status: 'active',
+              total_moves: 0,
+              player_color: 'white',
+              player_name: null,
+              engine_version: '1.0.0'
+            },
+            board: response.data.board,
+            move_history: response.data.move_history || [],
+            is_player_turn: response.data.is_player_turn,
+            status: 'active'
+          };
+          set({ currentGame: newGameState });
+          get().init(); // Refresh recent games list
+        }
+      } catch (error) {
+        console.error('Failed to start new game:', error);
+      } finally {
+        set({ loading: false });
+      }
+    },
+
+    loadGame: async (gameId: string, mode: GameMode) => {
+      set({ loading: true });
+      try {
+        const response = await axios.get(`${API_BASE_URL}/games/${mode}/${gameId}`);
+        set({ currentGame: response.data });
+      } catch (error) {
+        console.error('Failed to load game:', error);
+      } finally {
+        set({ loading: false });
+      }
+    },
+
+    deleteGame: async (gameId: string, mode: GameMode) => {
+      try {
+        await axios.delete(`${API_BASE_URL}/games/${mode}/${gameId}`);
+        get().init(); // Refresh recent games list
+      } catch (error) {
+        console.error('Failed to delete game:', error);
+      }
+    },
+  },
+
+  uiActions: {
+    setTheme: (theme: Theme) => {
+      set({ theme });
+      localStorage.setItem('chess_theme', JSON.stringify(theme));
+    },
+    setPreferences: (prefs: Partial<UserPreferences>) => {
+      const newPrefs = { ...get().preferences, ...prefs };
+      set({ preferences: newPrefs });
+      localStorage.setItem('chess_preferences', JSON.stringify(newPrefs));
     }
   },
 
-  // Game history actions
-  addGame: (game: GameRecord) => set((state) => ({
-    gameHistory: [game, ...state.gameHistory].slice(0, 100), // Keep last 100 games
-    modelStats: {
-      ...state.modelStats,
-      totalGames: state.modelStats.totalGames + 1,
-      recentGames: [game, ...state.modelStats.recentGames].slice(0, 10),
-      winRate: calculateWinRate([game, ...state.modelStats.recentGames]),
-      createdAt: state.modelStats.totalGames === 0 ? game.timestamp : state.modelStats.createdAt
+  init: async () => {
+    try {
+      // Load theme from localStorage
+      const savedTheme = localStorage.getItem('chess_theme');
+      if (savedTheme) {
+        set({ theme: JSON.parse(savedTheme) });
+      }
+
+      // Load preferences from localStorage
+      const savedPrefs = localStorage.getItem('chess_preferences');
+      if (savedPrefs) {
+        set({ preferences: JSON.parse(savedPrefs) });
+      }
+
+      // Load model stats
+      try {
+        const statsResponse = await axios.get(`${API_BASE_URL}/stats`);
+        set({ modelStats: statsResponse.data });
+      } catch (error) {
+        console.error('Failed to load model stats:', error);
+        // Set default stats if loading fails
+        set({
+          modelStats: {
+            wins: 0,
+            losses: 0,
+            draws: 0
+          }
+        });
+      }
+
+      // Load leaderboard
+      try {
+        const leaderboardResponse = await axios.get(`${API_BASE_URL}/leaderboard`);
+        set({ leaderboard: leaderboardResponse.data });
+      } catch (error) {
+        console.error('Failed to load leaderboard:', error);
+        set({ leaderboard: [] });
+      }
+
+      // Load recent games
+      try {
+        const response = await axios.get(`${API_BASE_URL}/games`);
+        set({ recentGames: response.data });
+
+        // Load current game if there's an active one
+        const activeGame = response.data.find((game: GameMetadata) => game.status === 'active');
+        if (activeGame) {
+          await get().gameActions.loadGame(activeGame.game_id, activeGame.mode);
+        }
+      } catch (error) {
+        console.error('Failed to load games:', error);
+        set({ recentGames: [] });
+      }
+    } catch (error) {
+      console.error('Failed to initialize store:', error);
     }
-  })),
-
-  updateModelStats: (stats: Partial<ModelStats>) => set((state) => ({
-    modelStats: { ...state.modelStats, ...stats }
-  })),
-
-  updateLeaderboard: (entries: LeaderboardEntry[]) => set(() => ({
-    leaderboard: entries
-  }))
+  },
 }));
 
 function calculateWinRate(games: GameRecord[]): number {

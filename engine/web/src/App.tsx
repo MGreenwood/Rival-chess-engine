@@ -4,12 +4,14 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { GameControls } from './components/GameControls'
 import { MoveHistory } from './components/MoveHistory'
 import ModelStats from './components/ModelStats'
+import { CommunityGame } from './components/CommunityGame'
 import useStore from './store/store'
 
 const App: React.FC = () => {
   const { preferences, gameActions, currentGame } = useStore();
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
   const [currentMoveIndex, setCurrentMoveIndex] = useState(-1);
+  const [gameMode, setGameMode] = useState<'single' | 'community'>('single');
   const [loading, setLoading] = useState(false);
 
   // Initialize store
@@ -127,14 +129,27 @@ const App: React.FC = () => {
       <div className="fixed top-0 left-0 right-0 h-14 bg-gray-800 border-b border-gray-700 flex items-center px-4 z-10">
         <div className="flex-1 flex items-center">
           <h1 className="text-xl font-bold text-gray-100">RivalAI Chess</h1>
-          <div className="ml-4 flex items-center space-x-2">
-            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-              currentGame?.status === 'active' 
-                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200' 
-                : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
-            }`}>
-              {currentGame?.status === 'active' ? 'Game in Progress' : 'Game Not Started'}
-            </span>
+          <div className="ml-4 flex items-center space-x-4">
+            <button
+              onClick={() => setGameMode('single')}
+              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                gameMode === 'single'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              Single Player
+            </button>
+            <button
+              onClick={() => setGameMode('community')}
+              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                gameMode === 'community'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              Community vs AI
+            </button>
           </div>
         </div>
         <div className="flex items-center space-x-4">
@@ -159,40 +174,59 @@ const App: React.FC = () => {
 
         {/* Main game area */}
         <div className="flex-1 flex flex-col items-center justify-start p-4 overflow-y-auto">
-          <div className="w-full max-w-[calc(100vh-16rem)]">
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 mb-4">
-              <div className="relative aspect-square">
-                <ChessGame 
-                  onMove={handleMove}
-                  onGameOver={handleGameOver}
-                  showCoordinates={preferences.showCoordinates}
-                  animationDuration={getAnimationDuration()}
-                  pieceStyle={preferences.pieceStyle}
-                  boardTheme={preferences.boardTheme}
-                  initialPosition={currentGame?.board}
-                  viewOnly={isViewOnly()}
-                />
-                {currentGame && !currentGame.is_player_turn && !loading && !isViewOnly() && currentGame.status === 'active' && (
-                  <div className="absolute inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center">
-                    <div className="text-white text-sm font-medium px-4 py-2 bg-chess-darker bg-opacity-90 rounded">
-                      Engine is thinking...
+          {gameMode === 'single' ? (
+            <div className="w-full max-w-[calc(100vh-16rem)]">
+              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 mb-4">
+                <div className="relative aspect-square">
+                  <ChessGame 
+                    onMove={handleMove}
+                    onGameOver={handleGameOver}
+                    showCoordinates={preferences.showCoordinates}
+                    animationDuration={getAnimationDuration()}
+                    pieceStyle={preferences.pieceStyle}
+                    boardTheme={preferences.boardTheme}
+                    initialPosition={currentGame?.board}
+                    viewOnly={isViewOnly()}
+                  />
+                  {currentGame && !currentGame.is_player_turn && !loading && !isViewOnly() && currentGame.status === 'active' && (
+                    <div className="absolute inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center">
+                      <div className="text-white text-sm font-medium px-4 py-2 bg-chess-darker bg-opacity-90 rounded">
+                        Engine is thinking...
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
+              </div>
+              <div className="mb-4">
+                <GameControls />
               </div>
             </div>
-            <div className="mb-4">
-              <GameControls />
-            </div>
-          </div>
+          ) : (
+            <CommunityGame />
+          )}
         </div>
 
         {/* Right sidebar - Move History */}
         <div className="w-80 p-4 hidden lg:block overflow-y-auto">
-          <MoveHistory
-            currentMoveIndex={currentMoveIndex}
-            onMoveSelect={handleMoveSelect}
-          />
+          {gameMode === 'single' ? (
+            <MoveHistory
+              currentMoveIndex={currentMoveIndex}
+              onMoveSelect={handleMoveSelect}
+            />
+          ) : (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4">
+              <h2 className="text-xl font-bold mb-3 text-gray-900 dark:text-white">
+                How to Play
+              </h2>
+              <ul className="space-y-2 text-gray-600 dark:text-gray-300">
+                <li>• Click squares to vote for a move</li>
+                <li>• Each player gets one vote per turn</li>
+                <li>• Voting lasts 10 seconds</li>
+                <li>• Most voted move is played</li>
+                <li>• Ties are broken randomly</li>
+              </ul>
+            </div>
+          )}
         </div>
 
         {/* Mobile view for sidebars */}
@@ -202,10 +236,23 @@ const App: React.FC = () => {
               <ModelStats />
             </div>
             <div className="col-span-1 overflow-y-auto max-h-48">
-              <MoveHistory
-                currentMoveIndex={currentMoveIndex}
-                onMoveSelect={handleMoveSelect}
-              />
+              {gameMode === 'single' ? (
+                <MoveHistory
+                  currentMoveIndex={currentMoveIndex}
+                  onMoveSelect={handleMoveSelect}
+                />
+              ) : (
+                <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4">
+                  <h2 className="text-lg font-bold mb-2 text-gray-900 dark:text-white">
+                    How to Play
+                  </h2>
+                  <ul className="space-y-1 text-sm text-gray-600 dark:text-gray-300">
+                    <li>• Click squares to vote</li>
+                    <li>• 10 second voting</li>
+                    <li>• Most votes wins</li>
+                  </ul>
+                </div>
+              )}
             </div>
           </div>
         </div>
