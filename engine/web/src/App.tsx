@@ -1,143 +1,220 @@
-import { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { ChessGame } from './components/Chessboard'
+import { SettingsPanel } from './components/SettingsPanel'
+import { GameControls } from './components/GameControls'
+import { MoveHistory } from './components/MoveHistory'
+import ModelStats from './components/ModelStats'
+import useStore from './store/store'
 
-function App() {
-  const [lastMove, setLastMove] = useState<string | null>(null)
-  const [gameStatus, setGameStatus] = useState<string | null>(null)
-  const [currentFen, setCurrentFen] = useState<string>('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1')
+const App: React.FC = () => {
+  const { preferences, gameActions, currentGame } = useStore();
+  const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+  const [currentMoveIndex, setCurrentMoveIndex] = useState(-1);
+  const [loading, setLoading] = useState(false);
 
-  const handleMove = (move: string, fen: string) => {
-    setLastMove(move)
-    setCurrentFen(fen)
-  }
+  // Initialize store
+  useEffect(() => {
+    useStore.getState().init();
+  }, []);
+
+  // Update currentMoveIndex when a new game starts
+  useEffect(() => {
+    if (!currentGame) {
+      setCurrentMoveIndex(-1);
+    }
+  }, [currentGame]);
+
+  const handleMove = (move: string) => {
+    // Don't allow moves if the game is over
+    if (currentGame?.status && currentGame.status !== 'active') {
+      console.log('Game is already over:', currentGame.status);
+      return;
+    }
+    setLoading(true);
+    gameActions.makeMove(move).then(() => {
+      // After a successful move, update the current move index
+      if (currentGame?.move_history) {
+        setCurrentMoveIndex(currentGame.move_history.length);
+      }
+      setLoading(false);
+    });
+  };
 
   const handleGameOver = (status: string) => {
-    setGameStatus(status)
-  }
+    console.log('Game over:', status);
+    // You could show a modal or notification here
+  };
+
+  // Get user-friendly game status message
+  const getGameStatusMessage = () => {
+    if (!currentGame) return null;
+    switch (currentGame.status) {
+      case 'white_wins':
+        return 'Checkmate! You won!';
+      case 'black_wins':
+        return 'Checkmate! Engine wins!';
+      case 'draw_stalemate':
+        return 'Game drawn by stalemate';
+      case 'draw_insufficient':
+        return 'Game drawn by insufficient material';
+      case 'draw_repetition':
+        return 'Game drawn by repetition';
+      case 'draw_fifty_moves':
+        return 'Game drawn by fifty-move rule';
+      default:
+        return null;
+    }
+  };
+
+  const gameStatusMessage = getGameStatusMessage();
+
+  // Calculate animation duration based on preference
+  const getAnimationDuration = (): number => {
+    switch (preferences.animationSpeed) {
+      case 'fast':
+        return 150;
+      case 'slow':
+        return 450;
+      default:
+        return 300;
+    }
+  };
+
+  // Handle move navigation
+  const handleMoveSelect = (index: number) => {
+    if (!currentGame?.move_history) return;
+    
+    // Validate index
+    if (index >= -1 && index < currentGame.move_history.length) {
+      setCurrentMoveIndex(index);
+      
+      // Get the position after the selected move
+      if (index === -1) {
+        // Initial position
+        gameActions.viewPosition('');
+      } else {
+        // Get position after the selected move
+        const movesToPlay = currentGame.move_history.slice(0, index + 1);
+        gameActions.viewPosition(movesToPlay.join(' '));
+      }
+    }
+  };
+
+  // Determine if the board should be in view-only mode
+  const isViewOnly = () => {
+    if (!currentGame) return false;
+    if (!currentGame.move_history) return false;
+    
+    // Allow moves only when:
+    // 1. We're at the latest position (currentMoveIndex matches the last move)
+    // 2. Or we're at the initial position with no moves yet
+    const isAtLatestMove = currentMoveIndex === currentGame.move_history.length - 1;
+    const isInitialPositionWithNoMoves = currentMoveIndex === -1 && currentGame.move_history.length === 0;
+    
+    return !(isAtLatestMove || isInitialPositionWithNoMoves);
+  };
+
+  // Update currentMoveIndex when a new move is made
+  useEffect(() => {
+    if (currentGame?.move_history) {
+      setCurrentMoveIndex(currentGame.move_history.length - 1);
+    }
+  }, [currentGame?.move_history?.length]);
 
   return (
-    <div className="min-h-screen bg-chess-bg text-gray-100 flex">
-      {/* Main content */}
-      <div className="flex-1 flex flex-col h-screen">
-        {/* Top bar */}
-        <div className="h-10 bg-chess-darker flex items-center px-4">
-          <h1 className="text-lg font-semibold">RivalAI Chess</h1>
+    <div className={`min-h-screen bg-gray-900 ${preferences.theme === 'dark' ? 'dark' : ''}`}>
+      {/* Title Bar */}
+      <div className="fixed top-0 left-0 right-0 h-14 bg-gray-800 border-b border-gray-700 flex items-center px-4 z-10">
+        <div className="flex-1 flex items-center">
+          <h1 className="text-xl font-bold text-gray-100">RivalAI Chess</h1>
+          <div className="ml-4 flex items-center space-x-2">
+            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+              currentGame?.status === 'active' 
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200' 
+                : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+            }`}>
+              {currentGame?.status === 'active' ? 'Game in Progress' : 'Game Not Started'}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center space-x-4">
+          <button
+            onClick={() => setIsSettingsOpen(true)}
+            className="p-2 text-gray-400 hover:text-gray-100 rounded-lg hover:bg-gray-700 transition-colors"
+            title="Settings"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="fixed inset-0 pt-14 flex">
+        {/* Left sidebar - Model Stats */}
+        <div className="w-80 p-4 hidden lg:block overflow-y-auto">
+          <ModelStats />
         </div>
 
         {/* Main game area */}
-        <div className="flex-1 flex overflow-hidden">
-          {/* Center container */}
-          <div className="flex-1 flex justify-center">
-            {/* Game section - fixed width */}
-            <div className="w-[640px] flex flex-col">
-              {/* Player info - top */}
-              <div className="h-12 bg-chess-dark flex items-center px-3">
-                <div className="flex items-center space-x-2">
-                  <div className="w-8 h-8 bg-chess-lighter rounded-full flex items-center justify-center">
-                    <span className="text-lg">⚫</span>
+        <div className="flex-1 flex flex-col items-center justify-start p-4 overflow-y-auto">
+          <div className="w-full max-w-[calc(100vh-16rem)]">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 mb-4">
+              <div className="relative aspect-square">
+                <ChessGame 
+                  onMove={handleMove}
+                  onGameOver={handleGameOver}
+                  showCoordinates={preferences.showCoordinates}
+                  animationDuration={getAnimationDuration()}
+                  pieceStyle={preferences.pieceStyle}
+                  boardTheme={preferences.boardTheme}
+                  initialPosition={currentGame?.board}
+                  viewOnly={isViewOnly()}
+                />
+                {currentGame && !currentGame.is_player_turn && !loading && !isViewOnly() && currentGame.status === 'active' && (
+                  <div className="absolute inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center">
+                    <div className="text-white text-sm font-medium px-4 py-2 bg-chess-darker bg-opacity-90 rounded">
+                      Engine is thinking...
+                    </div>
                   </div>
-                  <div>
-                    <div className="text-sm font-medium">Black</div>
-                    <div className="text-xs text-gray-400">RivalAI Engine</div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Chessboard container */}
-              <div className="flex-1 flex items-center justify-center bg-chess-bg">
-                <div className="flex-shrink-0">
-                  <ChessGame
-                    onMove={handleMove}
-                    onGameOver={handleGameOver}
-                  />
-                </div>
-              </div>
-
-              {/* Player info - bottom */}
-              <div className="h-12 bg-chess-dark flex items-center px-3">
-                <div className="flex items-center space-x-2">
-                  <div className="w-8 h-8 bg-chess-lighter rounded-full flex items-center justify-center">
-                    <span className="text-lg">⚪</span>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium">White</div>
-                    <div className="text-xs text-gray-400">You</div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Controls */}
-              <div className="h-12 bg-chess-dark flex items-center justify-center space-x-1 px-4">
-                <button className="p-1.5 rounded bg-chess-darker hover:bg-chess-lighter transition-colors">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-                  </svg>
-                </button>
-                <button className="p-1.5 rounded bg-chess-darker hover:bg-chess-lighter transition-colors">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                  </svg>
-                </button>
-                <button className="p-1.5 rounded bg-chess-darker hover:bg-chess-lighter transition-colors">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                </button>
-                <button className="p-1.5 rounded bg-chess-darker hover:bg-chess-lighter transition-colors">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                  </svg>
-                </button>
-              </div>
-
-              {/* FEN Display */}
-              <div className="bg-chess-dark px-3 py-2 text-xs font-mono">
-                <div className="flex items-center space-x-2">
-                  <span className="text-gray-400">FEN:</span>
-                  <span className="text-gray-300">{currentFen}</span>
-                </div>
+                )}
               </div>
             </div>
+            <div className="mb-4">
+              <GameControls />
+            </div>
           </div>
+        </div>
 
-          {/* Analysis sidebar */}
-          <div className="w-80 bg-chess-dark border-l border-chess-border overflow-y-auto">
-            <div className="p-4">
-              <h2 className="text-base font-medium mb-4">Analysis</h2>
-              
-              {/* Engine evaluation */}
-              <div className="mb-4">
-                <div className="text-xs text-gray-400 mb-1">Engine Evaluation</div>
-                <div className="font-mono text-base">+0.3</div>
-              </div>
+        {/* Right sidebar - Move History */}
+        <div className="w-80 p-4 hidden lg:block overflow-y-auto">
+          <MoveHistory
+            currentMoveIndex={currentMoveIndex}
+            onMoveSelect={handleMoveSelect}
+          />
+        </div>
 
-              {/* Move history */}
-              <div>
-                <div className="text-xs text-gray-400 mb-1">Move History</div>
-                <div className="bg-chess-darker rounded p-2">
-                  {lastMove ? (
-                    <div className="grid grid-cols-2 gap-2 text-sm">
-                      <div className="text-gray-400">1.</div>
-                      <div>{lastMove}</div>
-                    </div>
-                  ) : (
-                    <div className="text-gray-500 text-xs">No moves yet</div>
-                  )}
-                </div>
-              </div>
-
-              {/* Game status */}
-              {gameStatus && (
-                <div className="mt-4 p-2 bg-chess-darker rounded">
-                  <div className="text-sm font-medium">
-                    {gameStatus}
-                  </div>
-                </div>
-              )}
+        {/* Mobile view for sidebars */}
+        <div className="fixed bottom-0 left-0 right-0 lg:hidden bg-gray-900">
+          <div className="grid grid-cols-2 gap-2 p-2">
+            <div className="col-span-1 overflow-y-auto max-h-48">
+              <ModelStats />
+            </div>
+            <div className="col-span-1 overflow-y-auto max-h-48">
+              <MoveHistory
+                currentMoveIndex={currentMoveIndex}
+                onMoveSelect={handleMoveSelect}
+              />
             </div>
           </div>
         </div>
       </div>
+
+      <SettingsPanel
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+      />
     </div>
   )
 }

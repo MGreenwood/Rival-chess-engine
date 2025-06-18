@@ -1,14 +1,30 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Chessboard } from 'react-chessboard';
 import type { Square, Piece } from 'react-chessboard/dist/chessboard/types';
-import { useGame } from '../hooks/useGame';
+import useStore from '../store/store';
 
 interface ChessGameProps {
-  onMove: (move: string, fen: string) => void;
+  onMove: (move: string) => void;
   onGameOver: (status: string) => void;
+  showCoordinates?: boolean;
+  animationDuration?: number;
+  pieceStyle?: string;
+  boardTheme?: string;
+  initialPosition?: string;
+  viewOnly?: boolean;
 }
 
-export function ChessGame({ onMove, onGameOver }: ChessGameProps) {
+export function ChessGame({ 
+  onMove, 
+  onGameOver,
+  showCoordinates = true,
+  animationDuration = 300,
+  pieceStyle = 'standard',
+  boardTheme = 'classic',
+  initialPosition,
+  viewOnly = false
+}: ChessGameProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [boardWidth, setBoardWidth] = useState(400);
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
   const [pendingPromotion, setPendingPromotion] = useState<{from: string, to: string} | null>(null);
@@ -16,27 +32,34 @@ export function ChessGame({ onMove, onGameOver }: ChessGameProps) {
   const [lastMoveFrom, setLastMoveFrom] = useState<Square | null>(null);
   const [lastMoveTo, setLastMoveTo] = useState<Square | null>(null);
 
-  const {
-    gameState,
-    error,
-    loading,
-    startNewGame,
-    makeMove,
-  } = useGame();
+  const { gameActions, currentGame, loading } = useStore();
+  const { makeMove, startNewGame } = gameActions;
 
-  // Handle window resize
+  // Add state for controlled board position
+  const [boardPosition, setBoardPosition] = useState<string>(initialPosition || currentGame?.board || 'start');
+
+  // Update board width when container size changes
   useEffect(() => {
-    const handleResize = () => {
-      // Calculate board size based on viewport height
-      const maxHeight = window.innerHeight - 300; // Account for header, footer, and controls
-      const maxWidth = window.innerWidth - 400; // Account for sidebar
-      const size = Math.min(maxHeight, maxWidth);
-      setBoardWidth(Math.max(300, Math.min(600, size))); // Min 300px, max 600px
+    if (!containerRef.current) return;
+
+    const updateWidth = () => {
+      if (containerRef.current) {
+        const containerWidth = containerRef.current.clientWidth;
+        // Use container width directly since parent now controls max size
+        setBoardWidth(containerWidth);
+      }
     };
-    
-    handleResize(); // Initial size
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+
+    // Initial size calculation
+    updateWidth();
+
+    // Create resize observer
+    const resizeObserver = new ResizeObserver(updateWidth);
+    resizeObserver.observe(containerRef.current);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
   }, []);
 
   // Start new game on mount
@@ -46,12 +69,50 @@ export function ChessGame({ onMove, onGameOver }: ChessGameProps) {
 
   // Update parent components
   useEffect(() => {
-    if (gameState?.status && gameState.status !== 'active') {
-      onGameOver(gameState.status);
+    if (currentGame?.status && currentGame.status !== 'active') {
+      onGameOver(currentGame.status);
     }
-  }, [gameState?.status, onGameOver]);
+  }, [currentGame?.status, onGameOver]);
+
+  // Update position when game state changes
+  useEffect(() => {
+    if (currentGame?.board) {
+      console.log('Board state updated:', {
+        board: currentGame.board,
+        is_player_turn: currentGame.is_player_turn,
+        status: currentGame.status
+      });
+      setBoardPosition(currentGame.board);
+    }
+  }, [currentGame?.board]);
+
+  // Update position when initialPosition prop changes
+  useEffect(() => {
+    if (initialPosition) {
+      console.log('Initial position set:', initialPosition);
+      setBoardPosition(initialPosition);
+    }
+  }, [initialPosition]);
 
   const onDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
+    // If in view-only mode, don't allow moves
+    if (viewOnly) {
+      return false;
+    }
+
+    // If it's not the player's turn, don't allow moves
+    if (currentGame && !currentGame.is_player_turn) {
+      setMoveError("Not your turn");
+      return false;
+    }
+
+    console.log('Attempting move:', {
+      from: sourceSquare,
+      to: targetSquare,
+      piece,
+      currentBoard: currentGame?.board
+    });
+
     setSelectedSquare(null);
     setMoveError(null);
 
@@ -67,22 +128,31 @@ export function ChessGame({ onMove, onGameOver }: ChessGameProps) {
 
     // Make the move
     const moveString = `${sourceSquare}${targetSquare}`;
+    
+    // We'll return false initially and update the board position after validation
     makeMove(moveString)
       .then(() => {
         setLastMoveFrom(sourceSquare);
         setLastMoveTo(targetSquare);
-        if (gameState?.board) {
-          onMove(moveString, gameState.board);
+        if (currentGame?.board) {
+          onMove(moveString);
         }
       })
-      .catch((err) => {
-        setMoveError(err instanceof Error ? err.message : 'Invalid move');
+      .catch((err: any) => {
+        console.error('Move error:', err);
+        const errorMessage = err.response?.data?.error_message || err.message || 'Invalid move';
+        setMoveError(errorMessage);
+        // Force a board update to the correct position
+        if (currentGame?.board) {
+          // Small delay to ensure the piece has finished animating back
+          setTimeout(() => {
+            setBoardPosition(currentGame.board);
+          }, 100);
+        }
       });
 
-    // Return true to allow the piece to move visually
-    // The actual game state will be updated when the move is confirmed
-    return true;
-  }, [makeMove, gameState, onMove]);
+    return false; // Always return false and let the server response update the position
+  }, [makeMove, currentGame, onMove, viewOnly]);
 
   const handlePromotion = (promotionPiece: string) => {
     if (!pendingPromotion) return;
@@ -92,12 +162,12 @@ export function ChessGame({ onMove, onGameOver }: ChessGameProps) {
       .then(() => {
         setLastMoveFrom(pendingPromotion.from as Square);
         setLastMoveTo(pendingPromotion.to as Square);
-        if (gameState?.board) {
-          onMove(moveString, gameState.board);
+        if (currentGame?.board) {
+          onMove(moveString);
         }
       })
-      .catch((err) => {
-        setMoveError(err instanceof Error ? err.message : 'Invalid move');
+      .catch((err: Error) => {
+        setMoveError(err.message || 'Invalid move');
       })
       .finally(() => {
         setPendingPromotion(null);
@@ -105,70 +175,65 @@ export function ChessGame({ onMove, onGameOver }: ChessGameProps) {
   };
 
   const onSquareClick = useCallback((square: Square) => {
-    setSelectedSquare(prev => prev === square ? null : square);
-  }, []);
+    if (!viewOnly) {
+      setSelectedSquare(prev => prev === square ? null : square);
+    }
+  }, [viewOnly]);
 
-  console.log('Rendering chessboard:', { gameState, selectedSquare });
+  console.log('Rendering chessboard:', { currentGame, selectedSquare });
   return (
-    <div className="w-full flex flex-col items-center">
-      <div className="relative w-full flex justify-center">
-        <div style={{ width: boardWidth, maxWidth: '100%' }}>
-          <Chessboard
-            position={gameState?.board}
-            onPieceDrop={onDrop}
-            onSquareClick={onSquareClick}
-            boardWidth={boardWidth}
-            customBoardStyle={{
-              borderRadius: '0',
-              boxShadow: 'none',
-            }}
-            customDarkSquareStyle={{ backgroundColor: '#b58863' }}
-            customLightSquareStyle={{ backgroundColor: '#f0d9b5' }}
-            customSquareStyles={{
-              ...(selectedSquare && {
-                [selectedSquare]: {
-                  backgroundColor: 'rgba(155, 199, 0, 0.41)',
-                },
-              }),
-              ...(lastMoveFrom && {
-                [lastMoveFrom]: {
-                  backgroundColor: 'rgba(155, 199, 0, 0.41)',
-                },
-              }),
-              ...(lastMoveTo && {
-                [lastMoveTo]: {
-                  backgroundColor: 'rgba(155, 199, 0, 0.41)',
-                },
-              }),
-            }}
-            areArrowsAllowed={true}
-            showBoardNotation={true}
-            animationDuration={gameState?.is_player_turn ? 0 : 300}
-          />
-          
-          {gameState && !gameState.is_player_turn && !loading && (
-            <div className="absolute inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center">
-              <div className="text-white text-sm font-medium px-4 py-2 bg-chess-darker bg-opacity-90 rounded">
-                Engine is thinking...
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      
+    <div ref={containerRef} className="w-full h-full">
       {moveError && (
-        <div className="mt-3 text-red-400 text-sm font-medium text-center">
+        <div className="absolute top-0 left-0 right-0 z-10 p-2 bg-red-500 text-white text-sm text-center rounded-t-lg">
           {moveError}
         </div>
       )}
+      <Chessboard
+        position={boardPosition}
+        onPieceDrop={onDrop}
+        onSquareClick={onSquareClick}
+        boardWidth={boardWidth}
+        customBoardStyle={{
+          borderRadius: '4px',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)',
+        }}
+        customDarkSquareStyle={{ 
+          backgroundColor: boardTheme === 'classic' ? '#b58863' : '#70a2a3' 
+        }}
+        customLightSquareStyle={{ 
+          backgroundColor: boardTheme === 'classic' ? '#f0d9b5' : '#deeed6' 
+        }}
+        customSquareStyles={{
+          ...(selectedSquare && {
+            [selectedSquare]: {
+              backgroundColor: 'rgba(155, 199, 0, 0.41)',
+            },
+          }),
+          ...(lastMoveFrom && {
+            [lastMoveFrom]: {
+              backgroundColor: 'rgba(155, 199, 0, 0.41)',
+            },
+          }),
+          ...(lastMoveTo && {
+            [lastMoveTo]: {
+              backgroundColor: 'rgba(155, 199, 0, 0.41)',
+            },
+          }),
+        }}
+        areArrowsAllowed={true}
+        showBoardNotation={showCoordinates}
+        animationDuration={currentGame?.is_player_turn ? 0 : animationDuration}
+      />
       
-      {error && (
-        <div className="mt-3 text-red-400 text-sm font-medium text-center">
-          {error}
+      {currentGame && !currentGame.is_player_turn && !loading && !viewOnly && (
+        <div className="absolute inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center">
+          <div className="text-white text-sm font-medium px-4 py-2 bg-chess-darker bg-opacity-90 rounded">
+            Engine is thinking...
+          </div>
         </div>
       )}
       
-      {pendingPromotion && (
+      {pendingPromotion && !viewOnly && (
         <div className="fixed inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center backdrop-blur-sm z-50">
           <div className="bg-chess-dark p-4 rounded shadow-xl">
             <h3 className="text-sm font-medium mb-3 text-center text-gray-200">Choose Promotion</h3>
