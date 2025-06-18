@@ -374,8 +374,9 @@ async fn main() -> std::io::Result<()> {
     println!("Using checkpoint: {}", args.checkpoint);
     
     // Set up Python environment
-    let python_src_path = "../python/src";
-    let venv_path = "venvEngine/Lib/site-packages";
+    let current_dir = std::env::current_dir().unwrap();
+    let python_src_path = current_dir.join("..").join("python").join("src").to_str().unwrap().to_string();
+    let venv_path = current_dir.join("venvEngine").join("Lib").join("site-packages").to_str().unwrap().to_string();
     std::env::set_var("PYTHONPATH", format!("{};{}", python_src_path, venv_path));
     
     // Initialize Python with proper model loading
@@ -383,8 +384,8 @@ async fn main() -> std::io::Result<()> {
         // Add paths to Python sys.path
         let sys = py.import("sys").unwrap();
         let sys_path = sys.getattr("path").unwrap();
-        sys_path.call_method1("insert", (0, python_src_path)).unwrap();
-        sys_path.call_method1("insert", (0, venv_path)).unwrap();
+        sys_path.call_method1("insert", (0, &python_src_path)).unwrap();
+        sys_path.call_method1("insert", (0, &venv_path)).unwrap();
         
         println!("Python path:");
         for path_result in sys_path.iter().unwrap() {
@@ -562,6 +563,9 @@ async fn main() -> std::io::Result<()> {
     // Helper function to create fallback engine
     fn create_fallback_engine(py: Python) -> rival_ai::Engine {
         println!("Creating fallback engine with random move generator");
+        
+        // First import chess module in this scope
+        let _ = py.import("chess").unwrap();
         
         // Create a simple fallback model that returns random moves
         let code = r#"
