@@ -44,6 +44,7 @@ ENV/
 *.npy
 *.npz
 *.zip
+*.pgn
 
 # Training data and logs
 experiments/
