@@ -1,9 +1,14 @@
-import React, { memo } from 'react';
+import React, { memo, useEffect } from 'react';
 import useStore from '../store/store';
 import { formatDistanceToNow, isValid } from 'date-fns';
 
 const ModelStats: React.FC = memo(() => {
-  const { modelStats, recentGames } = useStore();
+  const { modelStats, recentGames, currentMode, uiActions } = useStore();
+  
+  // Refresh stats when mode changes
+  useEffect(() => {
+    uiActions.loadStatsForMode(currentMode);
+  }, [currentMode, uiActions]);
   
   if (!modelStats) {
     return (
@@ -28,12 +33,17 @@ const ModelStats: React.FC = memo(() => {
   const aiDraws = playerDraws;        // Draws are the same
   const aiWinRate = totalGames > 0 ? ((aiWins / totalGames) * 100) : 0;
   
-  // Get last 10 completed games, sorted by most recent
+  // Get last 10 completed games for the current mode, sorted by most recent
   // Add date validation to filter out games with invalid dates
   const completedGames = recentGames
     .filter(game => {
       // Filter out active games and games with invalid dates
       if (game.status === 'active') return false;
+      
+      // Filter by current mode (show single-player games for 'single' mode, community games for 'community' mode)
+      const gameMode = game.mode;
+      if (currentMode === 'single' && gameMode !== 'single') return false;
+      if (currentMode === 'community' && gameMode !== 'community') return false;
       
       try {
         const date = new Date(game.last_move_at);
@@ -75,6 +85,9 @@ const ModelStats: React.FC = memo(() => {
       <div className="mb-4">
         <h2 className="text-xl sm:text-2xl font-bold mb-3 text-gray-900 dark:text-white">
           AI Model Stats
+          <span className="text-sm font-normal text-gray-500 dark:text-gray-400 ml-2">
+            ({currentMode === 'community' ? 'Community Model' : 'Training Model'})
+          </span>
         </h2>
         <div className="grid grid-cols-3 gap-3">
           <div>
@@ -117,7 +130,7 @@ const ModelStats: React.FC = memo(() => {
       {/* Recent Games (from AI's perspective) */}
       <div>
         <h3 className="text-lg sm:text-xl font-semibold mb-3 text-gray-900 dark:text-white">
-          Recent Games
+          Recent {currentMode === 'community' ? 'Community' : 'Training'} Games
         </h3>
         {completedGames.length > 0 ? (
           <div className="space-y-2 max-h-64 overflow-y-auto">
@@ -178,7 +191,10 @@ const ModelStats: React.FC = memo(() => {
           </div>
         ) : (
           <p className="text-gray-500 dark:text-gray-400 text-sm">
-            No games played yet. The AI is waiting for players to challenge it!
+            {currentMode === 'community' 
+              ? 'No community games played yet. Join the community challenge to start playing!'
+              : 'No training games played yet. Start a training game to help improve the AI!'
+            }
           </p>
         )}
       </div>

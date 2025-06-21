@@ -1637,6 +1637,7 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
         let stats = match metadata.mode {
             GameMode::SinglePlayer => &mut single_player_stats,
             GameMode::Community => &mut community_stats,
+            GameMode::UCI => &mut single_player_stats, // UCI tournament games count as single-player for stats
         };
         
         if matches!(metadata.status, 
@@ -1771,11 +1772,12 @@ async fn refresh_stats(data: web::Data<AppState>) -> impl Responder {
     match data.game_storage.list_games(None) {
         Ok(games) => {
             let total_games = games.len();
-            let single_player_games = games.iter().filter(|g| matches!(g.mode, GameMode::SinglePlayer)).count();
+            let single_player_games = games.iter().filter(|g| matches!(g.mode, GameMode::SinglePlayer | GameMode::UCI)).count();
             let community_games = games.iter().filter(|g| matches!(g.mode, GameMode::Community)).count();
+            let uci_games = games.iter().filter(|g| matches!(g.mode, GameMode::UCI)).count();
             
-            println!("Stats refresh: Found {} total games ({} single-player, {} community)", 
-                total_games, single_player_games, community_games);
+            println!("Stats refresh: Found {} total games ({} single-player, {} community, {} UCI)", 
+                total_games, single_player_games - uci_games, community_games, uci_games);
         }
         Err(e) => {
             println!("Error during stats refresh: {}", e);
@@ -2082,9 +2084,10 @@ class UltraDenseFallbackModel:
                 let total_games = games.len();
                 let single_player_games = games.iter().filter(|g| matches!(g.mode, GameMode::SinglePlayer)).count();
                 let community_games = games.iter().filter(|g| matches!(g.mode, GameMode::Community)).count();
+                let uci_games = games.iter().filter(|g| matches!(g.mode, GameMode::UCI)).count();
                 
-                println!("📁 Found {} unarchived games ({} single-player, {} community)", 
-                    total_games, single_player_games, community_games);
+                println!("📁 Found {} unarchived games ({} single-player, {} community, {} UCI)", 
+                    total_games, single_player_games, community_games, uci_games);
                 
                 if total_games == 0 {
                     println!("📁 No unarchived games found - this is normal after game archival");
@@ -2550,7 +2553,7 @@ async fn background_self_play_task(
                 new_self_play = (current_self_play + scale_factor).min(max_self_play);
             } else if gpu_util > target_gpu_util + 0.1 {
                 // GPU getting saturated - scale back
-                new_self_play = (current_self_play - 2).max(min_self_play);
+                new_self_play = current_self_play.saturating_sub(2).max(min_self_play);
             }
         } else if active_players <= 2 {
             // Low traffic - moderate scaling
@@ -2562,7 +2565,7 @@ async fn background_self_play_task(
             } else if gpu_util < target_gpu_util - 0.1 {
                 new_self_play = (current_self_play + 1).min(20);  // Conservative scaling
             } else if gpu_util > target_gpu_util + 0.1 {
-                new_self_play = (current_self_play - 1).max(min_self_play);
+                new_self_play = current_self_play.saturating_sub(1).max(min_self_play);
             }
         } else {
             // High traffic - scale down to preserve resources for players
@@ -2573,10 +2576,10 @@ async fn background_self_play_task(
                 new_self_play = min_self_play;
             } else if active_players > 5 {
                 // High traffic - limited self-play  
-                new_self_play = (current_self_play - 2).max(min_self_play).min(5);
+                new_self_play = current_self_play.saturating_sub(2).max(min_self_play).min(5);
             } else {
                 // Moderate traffic
-                new_self_play = (current_self_play - 1).max(min_self_play).min(10);
+                new_self_play = current_self_play.saturating_sub(1).max(min_self_play).min(10);
             }
         }
         

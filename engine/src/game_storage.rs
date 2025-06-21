@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub enum GameMode {
     SinglePlayer,
     Community,
+    UCI,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -128,6 +129,7 @@ impl GameStorage {
         let mode_dir = match mode {
             GameMode::SinglePlayer => "single_player",
             GameMode::Community => "community",
+            GameMode::UCI => "uci_matches",
         };
         self.base_path.join(mode_dir).join(format!("{}.json", game_id))
     }
@@ -172,6 +174,7 @@ impl GameStorage {
         let model_stats = match metadata.mode {
             GameMode::SinglePlayer => &mut stats.single_player,
             GameMode::Community => &mut stats.community,
+            GameMode::UCI => &mut stats.single_player, // UCI matches count as single player for stats
         };
         
         // Update overall stats
@@ -296,10 +299,14 @@ impl GameStorage {
             Some(GameMode::Community) => {
                 games.extend(read_games_from_dir(&self.base_path.join("community"))?);
             }
+            Some(GameMode::UCI) => {
+                games.extend(read_games_from_dir(&self.base_path.join("uci_matches"))?);
+            }
             None => {
-                // List games from both directories
+                // List games from all directories
                 games.extend(read_games_from_dir(&self.base_path.join("single_player"))?);
                 games.extend(read_games_from_dir(&self.base_path.join("community"))?);
+                games.extend(read_games_from_dir(&self.base_path.join("uci_matches"))?);
             }
         }
 

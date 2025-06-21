@@ -34,23 +34,6 @@ export const GameControls: React.FC = () => {
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4">
-      {/* Connection Status */}
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-          Game Controls
-        </h3>
-        <div className="flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${
-            connectionStatus === 'connected' ? 'bg-green-500' :
-            connectionStatus === 'connecting' ? 'bg-yellow-500' :
-            'bg-red-500'
-          }`} />
-          <span className="text-sm text-gray-600 dark:text-gray-300">
-            {connectionStatus}
-          </span>
-        </div>
-      </div>
-
       {/* Game Result */}
       {isGameOver && (
         <div className="mb-4 space-y-4">

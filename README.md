@@ -231,8 +231,7 @@ python python/scripts/train.py \
 cloudflared tunnel --config $env:TUNNEL_CONFIG run $env:TUNNEL_ID
 ## engine+backend
  cargo run --bin server -- --tensorboard --community-model-path "../python/experiments/rival_ai_v1_Alice/run_20250619_162208/checkpoints/best_model.pt"
-
-
+python scripts/uci_tournament.py --rival-ai "engine/target/release/uci.exe" --engines "C:\Program Files\ChessEngines\stockfish_17\stockfish-windows-x86-64-avx2.exe" --games 20 --time 0.3
 ### Training Output
 
 The training process generates:
