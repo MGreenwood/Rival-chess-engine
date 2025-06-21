@@ -1,224 +1,332 @@
-# RivalAI Chess Engine Design Document
+# RivalAI System Overview and Web Development Plan
 
-## Overview
-RivalAI is a novel chess engine implementing the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions.
+## System Architecture Overview
 
-## The CHESS System
+RivalAI is a sophisticated chess AI system that combines traditional chess engines with modern machine learning approaches. The system consists of three main components:
 
-The Chess Heterogeneous Encoding State System (CHESS) is a novel approach to chess position representation that transforms traditional board positions into rich, heterogeneous graph structures. This system:
+1. **Rust Engine Core** (`/engine/src/`)
+   - High-performance MCTS implementation
+   - Board representation and move generation
+   - PAG (Position Analysis Graph) implementation
+   - Python bridge for model inference
+   - WebSocket server for real-time game updates
 
-1. **Heterogeneous Encoding**: Captures different types of nodes (pieces) and edges (relationships) with their unique properties
-2. **State Representation**: Encodes the complete position state, including:
-   - Piece positions and relationships
-   - Strategic importance of squares
-   - Control and influence patterns
-   - Tactical and positional dynamics
-3. **System Integration**: Seamlessly connects with:
-   - Graph Neural Networks for position evaluation
-   - Monte Carlo Tree Search for move selection
-   - Training pipeline for model improvement
+2. **Python ML Components** (`/python/src/rival_ai/`)
+   - GNN model implementation
+   - Training pipeline
+   - Position analysis
+   - Specialization system
+   - Distributed training infrastructure
 
-## Core Architecture
+3. **Web Interface** (`/engine/web/`)
+   - React-based frontend with Tailwind CSS
+   - Real-time game visualization
+   - Analysis tools and insights
+   - Training monitoring
+   - Model statistics and leaderboard
 
-### 1. Position Representation (CHESS)
+## Current Implementation
 
-#### Node Types
-1. **Piece Nodes**
-   - Properties:
-     - Piece type (Pawn, Knight, Bishop, Rook, Queen, King)
-     - Color (White, Black)
-     - Current square coordinates
-     - Unique identifier
-     - Material value
-     - Mobility score
-     - Status flags (attacked, defended, part of king's shield)
+### 1. State Management
+- Zustand store for global state management
+- WebSocket connection for real-time updates
+- Game state synchronization
+- Model statistics tracking
+- User preferences persistence
 
-2. **Critical Square Nodes**
-   - Properties:
-     - Coordinates
-     - Control status (attackers/defenders count)
-     - Strategic importance score
-     - Type (outpost, weak square, central square, king vicinity)
+### 2. User Interface Components
+- Interactive chessboard with move validation
+- Model statistics dashboard
+  - Total games played
+  - Creation date and epoch tracking
+  - Training countdown timer
+  - Recent games history
+  - Player leaderboard
+- Game controls with connection status
+- Theme-aware settings panel
 
-#### Edge Types
-1. **Direct Attack/Defense**
-   - Direction: Directed
-   - Properties:
-     - Type (Attack/Defense)
-     - Strength/value
-     - Piece types involved
+### 3. Real-time Features
+- Live game state updates
+- Training progress monitoring
+- Connection status indicator
+- Game history tracking
+- Player statistics
 
-2. **Control/Influence**
-   - Direction: Directed
-   - Properties:
-     - Type (Control/Influence)
-     - Degree of control
-     - Potential future control
+### 4. Theme System
+- Light/dark mode support
+- Tailwind CSS integration
+- Responsive design
+- Consistent component styling
+- Customizable board themes
 
-3. **Mobility Pathway**
-   - Direction: Directed
-   - Properties:
-     - Move type
-     - Legality
-     - Safety score
+### 5. Game Features
+- Move validation
+- Piece promotion
+- Game status tracking
+- Player turn indication
+- Move history
 
-4. **Cooperative Relationship**
-   - Direction: Undirected
-   - Properties:
-     - Cooperation type (mutual defense, battery, bishop pair)
-     - Strength score
+## Next Steps
 
-5. **Obstructive Relationship**
-   - Direction: Undirected
-   - Properties:
-     - Obstruction type
-     - Severity
+### 1. Enhanced Analytics
+- Position evaluation graphs
+- Win rate statistics
+- Opening book analysis
+- Player improvement tracking
+- Training metrics visualization
 
-6. **Vulnerability Link**
-   - Direction: Directed
-   - Properties:
-     - Vulnerability type (Pin, Overload, Undefended)
-     - Severity
+### 2. Social Features
+- Game sharing
+- Player profiles
+- Achievement system
+- Tournament support
+- Community rankings
 
-7. **Pawn Structure**
-   - Direction: Undirected
-   - Properties:
-     - Structure type (chain, doubled, isolated, passed)
-     - Support status
+### 3. Training Visualization
+- Model training progress
+- Learning rate adjustments
+- Performance metrics
+- Quality assessment
+- Position novelty tracking
 
-### 2. Search System (MCTS)
+### 4. Advanced Game Modes
+- Custom time controls
+- Variant chess support
+- Training modes
+- Analysis tools
+- Interactive tutorials
 
-#### Components
-1. **Selection**
-   - UCT formula with PAG-based policy guidance
-   - Dynamic exploration factor
+## Technical Stack
 
-2. **Expansion**
-   - Legal move generation
-   - PAG construction for new positions
-   - Node initialization with prior probabilities
+### Frontend
+- React
+- TypeScript
+- Tailwind CSS
+- Zustand
+- WebSocket
 
-3. **Simulation**
-   - GNN evaluation instead of random playouts
-   - Value prediction for leaf nodes
+### Backend
+- Rust (actix-web)
+- WebSocket server
+- Python bridge
+- MCTS engine
+- Model inference
 
-4. **Backpropagation**
-   - Update statistics
-   - Update edge visit counts
-   - Propagate GNN evaluations
+### Machine Learning
+- PyTorch
+- Graph Neural Networks
+- Distributed training
+- Real-time inference
+- Position analysis
 
-### 3. Neural Network Architecture
+## Performance Targets
+- Move computation: < 100ms
+- UI updates: 60 FPS
+- Initial load: < 2s
+- WebSocket latency: < 50ms
+- Analysis display: < 500ms
 
-#### GNN Structure
-1. **Input Layer**
-   - Node feature processing
-   - Edge feature processing
-   - Global graph features
+## Development Guidelines
+- Type-safe implementations
+- Component-based architecture
+- Real-time first approach
+- Progressive enhancement
+- Accessibility compliance
 
-2. **Message Passing Layers**
-   - Multiple attention heads
-   - Edge feature integration
-   - Skip connections
+## Key Files and Components
 
-3. **Output Heads**
-   - Policy head (move probabilities)
-   - Value head (position evaluation)
+### Engine Core
+- `engine/src/mcts.rs`: Monte Carlo Tree Search implementation
+- `engine/src/pag/`: Position Analysis Graph modules
+- `engine/src/bridge/python.rs`: Python-Rust bridge
+- `engine/src/evaluation.rs`: Position evaluation
 
-## Implementation Details
+### ML System
+- `python/src/rival_ai/models/gnn.py`: Graph Neural Network model
+- `python/src/rival_ai/distributed/specialization/`: Model specialization system
+- `python/src/rival_ai/training/`: Training infrastructure
+- `python/src/rival_ai/analysis/`: Position analysis tools
 
-### 1. Rust Engine Core
-- Zero-cost abstractions for PAG operations
-- Lock-free concurrent MCTS
-- SIMD optimizations where applicable
-- Efficient memory management for nodes/edges
+### Current Web Implementation
+- `engine/web/src/App.tsx`: Main application component
+- `engine/web/src/components/Chessboard.tsx`: Chess board visualization
+- `engine/web/src/hooks/useGame.ts`: Game state management
 
-### 2. Python Training Infrastructure
-- PyTorch Geometric for GNN implementation
-- Distributed training support (planned)
-- Efficient PAG serialization
-- Training data augmentation (planned)
-- Comprehensive metrics tracking:
-  - Policy loss
-  - Value loss
-  - Total loss
-  - Entropy
-  - L2 regularization
-- Model checkpointing and resumption
-- TensorBoard integration for visualization
-- Logging and debugging support
+## Next Steps: Web Development Plan
 
-### 3. Rust-Python Bridge
-- Fast serialization protocol
-- Batch processing support
-- Asynchronous evaluation
+### 1. Architecture Planning
+The next agent should develop a detailed plan addressing:
 
-## Training Strategy
+1. **System Architecture**
+   - Frontend framework selection (current: React)
+   - State management solution
+   - API design for engine communication
+   - Real-time updates strategy
+   - Caching and performance optimization
 
-### Phase 1: Small Board Training
-- 5x5 board size
-- Basic piece movement
-- Simple PAG structures
-- Quick iteration and testing
-- Current focus:
-  - Training loop optimization
-  - Memory usage profiling
-  - Policy and value loss balancing
-  - Entropy regularization tuning
+2. **User Interface**
+   - Component hierarchy
+   - Responsive design approach
+   - Accessibility requirements
+   - Theme system
+   - Animation strategy
 
-### Phase 2: Full Board Training
-- Transfer learning from 5x5
-- Progressive board size increase
-- Gradual complexity introduction
-- PAG feature enrichment
-- Planned improvements:
-  - Early stopping
-  - Learning rate scheduling
-  - Distributed training
-  - Data augmentation
+3. **Feature Requirements**
+   - Game play interface
+   - Analysis tools
+   - Training visualization
+   - Model management
+   - User settings and preferences
 
-### Phase 3: Advanced Training
-- Complex position understanding
-- Strategic pattern recognition
-- Endgame specialization
-- Performance optimization
+4. **Performance Considerations**
+   - Bundle size optimization
+   - Code splitting strategy
+   - Asset optimization
+   - Caching strategy
+   - API efficiency
 
-## Performance Considerations
+5. **Development Infrastructure**
+   - Build system
+   - Testing framework
+   - CI/CD pipeline
+   - Development workflow
+   - Documentation system
 
-### 1. PAG Construction
-- Parallel feature computation
-- Incremental updates
-- Cache-friendly data structures
-- Current metrics:
-  - PAG construction: < 0.5ms per position
-  - Feature computation: < 0.2ms per position
-  - Edge detection: < 0.3ms per position
+### 2. Technical Requirements
 
-### 2. MCTS Efficiency
-- Batch GNN evaluation
-- Parallel tree expansion
-- Smart pruning based on PAG properties
-- Current focus:
-  - Memory optimization during search
-  - Adaptive simulation counts
-  - Transposition table implementation
+The next agent should consider:
 
-### 3. Memory Management
-- Object pooling for nodes/edges
-- Efficient graph storage
-- Smart garbage collection
-- Current challenges:
-  - High memory usage during training
-  - Batch size optimization
-  - Gradient accumulation for larger batches
+1. **Dependencies**
+   - Required libraries and frameworks
+   - Version compatibility
+   - Bundle size impact
+   - Security implications
+   - Maintenance requirements
 
-## Future Extensions
+2. **API Design**
+   - REST endpoints
+   - WebSocket communication
+   - Authentication/Authorization
+   - Rate limiting
+   - Error handling
 
-### 1. Potential Improvements
-- Custom GNN layers for chess
-- Advanced PAG features
-- Specialized endgame handling
+3. **State Management**
+   - Game state
+   - Analysis state
+   - User preferences
+   - Cache management
+   - Real-time updates
 
-### 2. Research Opportunities
-- PAG pattern mining
-- Strategic concept learning
-- Transfer learning studies 
+4. **Performance Targets**
+   - Initial load time
+   - Time to interactive
+   - Frame rate
+   - Memory usage
+   - Network efficiency
+
+### 3. Development Priorities
+
+The next agent should create a prioritized plan for:
+
+1. **Core Features**
+   - Basic game play
+   - Move validation
+   - Position analysis
+   - Engine integration
+   - Real-time updates
+
+2. **Enhanced Features**
+   - Advanced analysis tools
+   - Training visualization
+   - Model management
+   - User customization
+   - Performance monitoring
+
+3. **User Experience**
+   - Responsive design
+   - Accessibility
+   - Error handling
+   - Loading states
+   - Feedback mechanisms
+
+### 4. Integration Points
+
+Consider integration with:
+
+1. **Engine Core**
+   - Move generation
+   - Position evaluation
+   - Engine control
+   - Analysis features
+   - Performance monitoring
+
+2. **ML System**
+   - Model inference
+   - Training visualization
+   - Specialization system
+   - Analysis tools
+   - Performance metrics
+
+3. **External Services**
+   - Authentication
+   - Analytics
+   - Logging
+   - Monitoring
+   - Storage
+
+## Expected Deliverables
+
+The next agent should provide:
+
+1. **Detailed Architecture Document**
+   - System design
+   - Component hierarchy
+   - Data flow
+   - API specifications
+   - Performance considerations
+
+2. **Implementation Plan**
+   - Feature roadmap
+   - Development phases
+   - Resource requirements
+   - Timeline estimates
+   - Risk assessment
+
+3. **Technical Specifications**
+   - API contracts
+   - State management
+   - Component specifications
+   - Performance requirements
+   - Testing strategy
+
+4. **Development Guidelines**
+   - Coding standards
+   - Documentation requirements
+   - Testing requirements
+   - Review process
+   - Deployment procedures
+
+## Current System Constraints
+
+1. **Performance Requirements**
+   - Move computation: < 100ms
+   - UI updates: 60 FPS
+   - Initial load: < 2s
+   - Analysis display: < 500ms
+   - Memory usage: < 500MB
+
+2. **Technical Constraints**
+   - Browser compatibility: Modern browsers
+   - Mobile support required
+   - Offline capability preferred
+   - PWA support desired
+   - Accessibility compliance required
+
+3. **Integration Requirements**
+   - Rust engine communication
+   - Python ML system integration
+   - Real-time updates
+   - State synchronization
+   - Error handling
+
+The next agent should use this information to create a comprehensive web development plan that addresses all these aspects while maintaining system performance and user experience. 

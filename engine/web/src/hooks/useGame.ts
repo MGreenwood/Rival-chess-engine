@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import type { GameState, GameStatus, MoveRequest, MoveResponse, GameSettings, WebSocketMessage } from '../types/chess';
+import useStore from '../store/store';
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
@@ -24,6 +25,9 @@ export function useGame(initialSettings?: GameSettings) {
   const connectWebSocket = useCallback((gameId: string) => {
     console.log('[connectWebSocket] Called for gameId:', gameId);
     
+    // Update connection status to connecting
+    useStore.setState({ connectionStatus: 'connecting' });
+    
     // Only close existing connection if it's for a different game
     if (wsRef.current?.readyState === WebSocket.OPEN) {
         const currentGameId = wsRef.current.url.split('/').pop();
@@ -42,6 +46,8 @@ export function useGame(initialSettings?: GameSettings) {
     socket.onopen = () => {
         console.log('[WebSocket] open for gameId:', gameId);
         setError(null);
+        // Update connection status to connected
+        useStore.setState({ connectionStatus: 'connected' });
         // Request initial game state
         socket.send(JSON.stringify({ command: 'refresh' }));
     };
@@ -91,10 +97,13 @@ export function useGame(initialSettings?: GameSettings) {
     socket.onerror = (error) => {
         console.error('[WebSocket] error for gameId:', gameId, error);
         setError('WebSocket connection error');
+        useStore.setState({ connectionStatus: 'disconnected' });
     };
 
     socket.onclose = (event) => {
         console.log('[WebSocket] closed for gameId:', gameId, 'code:', event.code, 'reason:', event.reason);
+        useStore.setState({ connectionStatus: 'disconnected' });
+        
         if (reconnectTimeoutRef.current) {
           window.clearTimeout(reconnectTimeoutRef.current);
           reconnectTimeoutRef.current = undefined;
@@ -106,6 +115,7 @@ export function useGame(initialSettings?: GameSettings) {
         if (event.code === 1006 && 
             gameState?.game_id === gameId && 
             gameState?.status === 'active') {
+            useStore.setState({ connectionStatus: 'connecting' });
             reconnectTimeoutRef.current = window.setTimeout(() => {
                 console.log('[WebSocket] Attempting reconnection after abnormal close for gameId:', gameId);
                 connectWebSocket(gameId);
@@ -148,7 +158,7 @@ const startNewGame = useCallback(async () => {
       wsRef.current = null;
     }
     const response = await axios.post<GameState>(
-      `${API_BASE_URL}/games`,
+      `${API_BASE_URL}/game`,
       initialSettings ?? {},
       { headers: { 'Content-Type': 'application/json' } }
     );
@@ -177,7 +187,7 @@ const makeMove = useCallback(async (move: string) => {
     setError(null);
     // 1. Send move to backend
     const response = await axios.post<MoveResponse>(
-      `${API_BASE_URL}/games/${gameState.game_id}/moves`,
+      `${API_BASE_URL}/game/${gameState.game_id}/move`,
       { move_str: move } as MoveRequest
     );
     console.log('Move response:', response.data);
@@ -200,7 +210,7 @@ const makeMove = useCallback(async (move: string) => {
 
     // 2. Call engine-move endpoint
     const engineResponse = await axios.post<MoveResponse>(
-      `${API_BASE_URL}/games/${gameState.game_id}/engine-move`
+      `${API_BASE_URL}/game/${gameState.game_id}/engine_move`
     );
     console.log('Engine move response:', engineResponse.data);
     if (engineResponse.data.success) {
@@ -237,7 +247,7 @@ const refreshGameState = useCallback(async () => {
   try {
     setLoading(true);
     setError(null);
-    const response = await axios.get<GameState>(`${API_BASE_URL}/games/${gameState.game_id}`);
+    const response = await axios.get<GameState>(`${API_BASE_URL}/game/${gameState.game_id}`);
     setGameStateWithLog(response.data);
   } catch (err) {
     setError('Failed to refresh game state');

@@ -1,25 +1,34 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder, middleware, HttpRequest};
-use actix_cors::Cors;
-use serde::{Deserialize, Serialize};
-use chess::{ChessMove, BoardStatus, MoveGen};
+use std::path::Path;
 use std::sync::Mutex;
-use uuid::Uuid;
-use serde_json;
+use actix_web::{web, App, HttpServer, HttpResponse, HttpRequest, Responder};
+use actix_web::middleware::Logger;
+use actix_cors::Cors;
 use actix_web_actors::ws;
-use actix::{Actor, StreamHandler, ActorContext};
-use rival_ai::Engine;
+use actix::{Actor, StreamHandler};
+use serde::{Deserialize, Serialize};
+use rival_ai::engine::Engine;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use pyo3::PyErr;
+use chrono::{DateTime, Utc};
+use chess::{Board as ChessBoard, ChessMove, BoardStatus};
+use std::str::FromStr;
 use clap::Parser;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use rand::{thread_rng, Rng};
+use rival_ai::game_storage::{GameStorage, GameState as StorageGameState, GameMode, GameStatus, GameMetadata};
+use rival_ai::ModelBridge;
+use serde_json::json;
+use std::fs;
+use pyo3::types::PyDict;
+use uuid;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "rival-ai-server")]
 #[command(about = "RivalAI Chess Engine Server")]
 struct Args {
     /// Path to the model checkpoint file
-    #[arg(short, long, default_value = "experiments/rival_ai_v1_Alice/run_20250616_154501/checkpoints/best_model.pt")]
-    checkpoint: String,
+    #[arg(short, long, default_value = "../python/experiments/rival_ai_v1_Alice/run_20250617_221622/checkpoints/best_model.pt")]
+    model_path: String,
     
     /// Server port
     #[arg(short, long, default_value = "3000")]
@@ -28,11 +37,17 @@ struct Args {
     /// Server host
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
+
+    /// Directory to save games for training
+    #[arg(long, default_value = "../python/training_games")]
+    games_dir: String,
 }
 
 #[derive(Deserialize)]
 struct MoveRequest {
     move_str: String,
+    board: String,
+    player_color: String,
 }
 
 #[derive(Serialize)]
@@ -43,15 +58,196 @@ struct MoveResponse {
     engine_move: Option<String>,
     is_player_turn: bool,
     error_message: Option<String>,
+    move_history: Vec<String>,
 }
 
-struct AppState {
-    engine: Mutex<Engine>,
+#[derive(Serialize, Deserialize)]
+struct SavedGame {
+    game_id: String,
+    moves: Vec<String>,
+    result: String,
+    timestamp: String,
+    player_color: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CommunityGameStateResponse {
+    game_id: String,
+    board: String,
+    status: String,
+    move_history: Vec<String>,
+    is_voting_phase: bool,
+    voting_ends_at: Option<String>,
+    current_votes: HashMap<String, usize>,
+    total_voters: usize,
+    your_vote: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VoteRequest {
+    move_str: String,
+    voter_id: String,
+}
+
+#[derive(Serialize)]
+struct VoteResponse {
+    success: bool,
+    error_message: Option<String>,
+    game_state: CommunityGameStateResponse,
+}
+
+#[derive(Clone)]
+pub struct CommunityGame {
+    board: ChessBoard,
+    move_history: Vec<String>,
+    votes: HashMap<String, HashSet<String>>,  // move -> set of voter IDs
+    voting_ends_at: Option<DateTime<Utc>>,
+    status: GameStatus,
+}
+
+impl CommunityGame {
+    pub fn new() -> Self {
+        Self {
+            board: ChessBoard::default(),
+            move_history: Vec::new(),
+            votes: HashMap::new(),
+            voting_ends_at: None,
+            status: GameStatus::Waiting,
+        }
+    }
+
+    pub fn start_voting(&mut self) {
+        self.voting_ends_at = Some(Utc::now() + chrono::Duration::seconds(10));
+        self.votes.clear();
+        if self.status == GameStatus::Waiting {
+            self.status = GameStatus::Active;
+        }
+    }
+
+    pub fn add_vote(&mut self, move_str: &str, voter_id: &str) -> Result<(), String> {
+        // Start voting phase if this is the first vote and game hasn't started
+        if self.status == GameStatus::Waiting {
+            self.start_voting();
+        } else if !self.is_voting_phase() {
+            return Err("No active voting phase".to_string());
+        }
+        
+        // Remove previous vote if exists
+        for votes in self.votes.values_mut() {
+            votes.remove(voter_id);
+        }
+        
+        // Add new vote
+        self.votes.entry(move_str.to_string())
+            .or_insert_with(HashSet::new)
+            .insert(voter_id.to_string());
+        
+        Ok(())
+    }
+
+    pub fn get_winning_move(&self) -> Option<String> {
+        if self.votes.is_empty() {
+            return None;
+        }
+
+        // Find moves with maximum votes
+        let max_votes = self.votes.values()
+            .map(|voters| voters.len())
+            .max()
+            .unwrap_or(0);
+
+        let winning_moves: Vec<String> = self.votes.iter()
+            .filter(|(_, voters)| voters.len() == max_votes)
+            .map(|(mv, _)| mv.clone())
+            .collect();
+
+        // Randomly select from moves with equal max votes
+        if winning_moves.is_empty() {
+            None
+        } else {
+            let mut rng = thread_rng();
+            Some(winning_moves[rng.gen_range(0..winning_moves.len())].clone())
+        }
+    }
+
+    fn make_move(&mut self, mv: ChessMove) {
+        let mut new_board = self.board.clone();
+        new_board = new_board.make_move_new(mv);
+        self.board = new_board;
+    }
+
+    pub fn process_votes(&mut self, engine: &mut Engine) -> Result<(), String> {
+        if !self.is_voting_phase() {
+            return Ok(());
+        }
+
+        if let Some(winning_move) = self.get_winning_move() {
+            // Make the player's move
+            let chess_move = parse_move(&winning_move)?;
+            self.make_move(chess_move);
+            self.move_history.push(winning_move);
+
+            // Make engine's move
+            if let Some(engine_move) = engine.get_best_move(self.board.clone()) {
+                self.make_move(engine_move);
+                self.move_history.push(engine_move.to_string());
+            }
+
+            // Check game status
+            if self.board.status() != BoardStatus::Ongoing {
+                self.status = match self.board.status() {
+                    BoardStatus::Checkmate => {
+                        if self.board.side_to_move() == chess::Color::White {
+                            GameStatus::BlackWins
+                        } else {
+                            GameStatus::WhiteWins
+                        }
+                    },
+                    BoardStatus::Stalemate => GameStatus::DrawStalemate,
+                    _ => GameStatus::Active,
+                };
+            }
+
+            // Start next voting phase
+            self.start_voting();
+        }
+
+        Ok(())
+    }
+
+    pub fn is_voting_phase(&self) -> bool {
+        if let Some(ends_at) = self.voting_ends_at {
+            Utc::now() <= ends_at
+        } else {
+            false
+        }
+    }
+}
+
+pub struct CommunityGameState {
+    pub game: Arc<Mutex<CommunityGame>>,
+    pub engine: Arc<Mutex<Engine>>,
+}
+
+impl Clone for CommunityGameState {
+    fn clone(&self) -> Self {
+        Self {
+            game: self.game.clone(),
+            engine: self.engine.clone(),
+        }
+    }
+}
+
+pub struct AppState {
+    pub game: Arc<Mutex<CommunityGame>>,
+    pub game_storage: Arc<GameStorage>,
+    pub engine: Arc<Mutex<Engine>>,
 }
 
 #[derive(Deserialize)]
 struct GameSettings {
-    // Accept but ignore for now
+    temperature: Option<f32>,
+    strength: Option<f32>,
     _time_control: Option<TimeControl>,
     _engine_strength: Option<u32>,
     _color: Option<String>,
@@ -64,7 +260,7 @@ struct TimeControl {
 }
 
 #[derive(Serialize)]
-struct GameState {
+struct WebGameState {
     game_id: String,
     board: String,
     status: String,
@@ -72,35 +268,24 @@ struct GameState {
     is_player_turn: bool,
 }
 
-// Helper function to parse chess moves
 fn parse_move(move_str: &str) -> Result<ChessMove, String> {
-    if move_str.len() < 4 || move_str.len() > 5 {
-        return Err("Invalid move format".to_string());
+    if move_str.len() < 4 {
+        return Err("Move string too short".to_string());
     }
 
-    let chars: Vec<char> = move_str.chars().collect();
-    if chars.len() < 4 {
-        return Err("Invalid move format".to_string());
-    }
+    let from = chess::Square::from_str(&move_str[0..2])
+        .map_err(|_| format!("Invalid 'from' square: {}", &move_str[0..2]))?;
+    let to = chess::Square::from_str(&move_str[2..4])
+        .map_err(|_| format!("Invalid 'to' square: {}", &move_str[2..4]))?;
 
-    let from = chess::Square::make_square(
-        chess::Rank::from_index((chars[1] as u8 - b'1') as usize),
-        chess::File::from_index((chars[0] as u8 - b'a') as usize),
-    );
-
-    let to = chess::Square::make_square(
-        chess::Rank::from_index((chars[3] as u8 - b'1') as usize),
-        chess::File::from_index((chars[2] as u8 - b'a') as usize),
-    );
-
-    let promotion = if chars.len() == 5 {
-        match chars[4] {
-            'q' => Some(chess::Piece::Queen),
-            'r' => Some(chess::Piece::Rook),
-            'b' => Some(chess::Piece::Bishop),
-            'n' => Some(chess::Piece::Knight),
+    let promotion = if move_str.len() > 4 {
+        Some(match move_str.chars().nth(4).unwrap() {
+            'q' => chess::Piece::Queen,
+            'r' => chess::Piece::Rook,
+            'b' => chess::Piece::Bishop,
+            'n' => chess::Piece::Knight,
             _ => return Err("Invalid promotion piece".to_string()),
-        }
+        })
     } else {
         None
     };
@@ -108,206 +293,236 @@ fn parse_move(move_str: &str) -> Result<ChessMove, String> {
     Ok(ChessMove::new(from, to, promotion))
 }
 
-async fn make_move(
-    data: web::Data<AppState>,
-    _game_id: web::Path<String>,
-    req: web::Json<MoveRequest>,
-) -> impl Responder {
-    let mut engine = data.engine.lock().unwrap();
-    let board = engine.board();
-    
-    println!("Received move request: '{}'", req.move_str);
-    println!("Current board: {}", board);
-    
-    match parse_move(&req.move_str) {
-        Ok(chess_move) => {
-            println!("Parsed move: {} -> {} (promotion: {:?})", 
-                chess_move.get_source(), 
-                chess_move.get_dest(), 
-                chess_move.get_promotion()
-            );
-            
-            // Check if move is legal
-            let legal_moves: Vec<ChessMove> = MoveGen::new_legal(&board).collect();
-            println!("Legal moves count: {}", legal_moves.len());
-            
-            // Print all legal moves for debugging
-            for (i, mv) in legal_moves.iter().enumerate() {
-                println!("Legal move {}: {} -> {} (promotion: {:?})", 
-                    i, mv.get_source(), mv.get_dest(), mv.get_promotion());
+fn get_game_result(board: &chess::Board) -> &'static str {
+    match board.status() {
+        BoardStatus::Ongoing => "active",
+        BoardStatus::Stalemate => "draw_stalemate",
+        BoardStatus::Checkmate => {
+            if board.side_to_move() == chess::Color::White {
+                "black_wins"
+            } else {
+                "white_wins"
             }
-            
-            // Print board in a readable format
-            println!("Current board position:");
-            let board_str = board.to_string();
-            let lines: Vec<&str> = board_str.split(' ').next().unwrap_or("").split('/').collect();
-            for (rank, line) in lines.iter().enumerate() {
-                println!("Rank {}: {}", 8 - rank, line);
-            }
-            
-            // Check specific squares
-            println!("Piece on f8: {:?}", board.piece_on(chess::Square::F8));
-            println!("Piece on h8: {:?}", board.piece_on(chess::Square::H8));
-            println!("Piece on g7: {:?}", board.piece_on(chess::Square::G7));
-            
-            if !board.legal(chess_move) {
-                println!("Move {} is not legal!", chess_move);
-                return HttpResponse::BadRequest().json(MoveResponse {
-                    success: false,
-                    board: board.to_string(),
-                    status: "invalid_move".to_string(),
-                    engine_move: None,
-                    is_player_turn: true,
-                    error_message: Some("Illegal move".to_string()),
-                });
-            }
-
-            println!("Move is legal, applying...");
-            engine.make_move(chess_move);
-            
-            // Respond immediately, do not make engine move yet
-            HttpResponse::Ok().json(MoveResponse {
-                success: true,
-                board: engine.board().to_string(),
-                status: if engine.is_game_over() { "game_over".to_string() } else { "active".to_string() },
-                engine_move: None,
-                is_player_turn: false, // Now it's the engine's turn
-                error_message: None,
-            })
-        }
-        Err(e) => {
-            println!("Failed to parse move '{}': {}", req.move_str, e);
-            HttpResponse::BadRequest().json(MoveResponse {
-                success: false,
-                board: board.to_string(),
-                status: "invalid_move".to_string(),
-                engine_move: None,
-                is_player_turn: true,
-                error_message: Some("Invalid move format".to_string()),
-            })
         }
     }
 }
 
-// New endpoint: engine makes its move
-async fn engine_move(
+async fn make_move(
     data: web::Data<AppState>,
-    _game_id: web::Path<String>,
+    path: web::Path<String>,
+    req: web::Json<MoveRequest>,
 ) -> impl Responder {
+    let game_id = path.into_inner();
     let mut engine = data.engine.lock().unwrap();
-    let board = engine.board();
-    if engine.is_game_over() {
+
+    // Load the game
+    let mut game_state = match data.game_storage.load_game(&game_id, &GameMode::SinglePlayer) {
+        Ok(state) => state,
+        Err(e) => return HttpResponse::NotFound().json(json!({
+            "error": format!("Game not found: {}", e)
+        })),
+    };
+
+    // Parse the current board position
+    let mut board = match ChessBoard::from_str(&req.0.board) {
+        Ok(b) => b,
+        Err(e) => return HttpResponse::BadRequest().json(json!({
+            "error": format!("Invalid board position: {}", e)
+        })),
+    };
+
+    // Parse and validate the player's move
+    let player_move = match parse_move(&req.0.move_str) {
+        Ok(m) => m,
+        Err(e) => return HttpResponse::BadRequest().json(json!({
+            "error": format!("Invalid move: {}", e)
+        })),
+    };
+
+    // Make the player's move
+    board = board.make_move_new(player_move);
+    game_state.board = board.to_string();
+    game_state.move_history.push(req.0.move_str.clone());
+    game_state.metadata.last_move_at = Utc::now();
+    game_state.metadata.total_moves += 1;
+
+    // Check if the game is over after player's move
+    if board.status() != BoardStatus::Ongoing {
+        game_state.metadata.status = match board.status() {
+            BoardStatus::Checkmate => {
+                if board.side_to_move() == chess::Color::White {
+                    GameStatus::BlackWins
+                } else {
+                    GameStatus::WhiteWins
+                }
+            },
+            BoardStatus::Stalemate => GameStatus::DrawStalemate,
+            _ => GameStatus::Active,
+        };
+        
+        // Save the game state
+        if let Err(e) = data.game_storage.save_game(&game_state) {
+            return HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to save game: {}", e)
+            }));
+        }
+
         return HttpResponse::Ok().json(MoveResponse {
             success: true,
-            board: board.to_string(),
-            status: "game_over".to_string(),
+            board: game_state.board,
+            status: game_state.metadata.status.to_string(),
             engine_move: None,
             is_player_turn: true,
             error_message: None,
+            move_history: game_state.move_history,
         });
     }
+
     // Get engine's move
-    let engine_move = if let Some(mv) = engine.get_best_move(board) {
-        let move_str = format!("{}{}", mv.get_source(), mv.get_dest());
-        let promotion = mv.get_promotion().map(|p| match p {
-            chess::Piece::Queen => 'q',
-            chess::Piece::Rook => 'r',
-            chess::Piece::Bishop => 'b',
-            chess::Piece::Knight => 'n',
-            _ => unreachable!(),
-        });
-        let move_str = if let Some(p) = promotion {
-            format!("{}{}", move_str, p)
-        } else {
-            move_str
-        };
-        engine.make_move(mv);
-        Some(move_str)
+    if let Some(engine_move) = engine.get_best_move(board.clone()) {
+        // Make the engine's move
+        board = board.make_move_new(engine_move);
+        game_state.board = board.to_string();
+        game_state.move_history.push(engine_move.to_string());
+        game_state.metadata.total_moves += 1;
+
+        // Check if the game is over after engine's move
+        if board.status() != BoardStatus::Ongoing {
+            game_state.metadata.status = match board.status() {
+                BoardStatus::Checkmate => {
+                    if board.side_to_move() == chess::Color::White {
+                        GameStatus::BlackWins
+                    } else {
+                        GameStatus::WhiteWins
+                    }
+                },
+                BoardStatus::Stalemate => GameStatus::DrawStalemate,
+                _ => GameStatus::Active,
+            };
+        }
+
+        // Save the updated game state
+        if let Err(e) = data.game_storage.save_game(&game_state) {
+            return HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to save game: {}", e)
+            }));
+        }
+
+        HttpResponse::Ok().json(MoveResponse {
+            success: true,
+            board: game_state.board,
+            status: game_state.metadata.status.to_string(),
+            engine_move: Some(engine_move.to_string()),
+            is_player_turn: true,
+            error_message: None,
+            move_history: game_state.move_history,
+        })
     } else {
-        None
-    };
-    HttpResponse::Ok().json(MoveResponse {
-        success: true,
-        board: engine.board().to_string(),
-        status: if engine.is_game_over() { "game_over".to_string() } else { "active".to_string() },
-        engine_move,
-        is_player_turn: true, // Now it's the player's turn
-        error_message: None,
-    })
+        return HttpResponse::InternalServerError().json(json!({
+            "error": "Engine failed to make a move"
+        }));
+    }
 }
 
-async fn create_game(
-    _settings: web::Json<serde_json::Value>,
-) -> impl Responder {
-    let game_id = Uuid::new_v4().to_string();
-    let board = chess::Board::default().to_string();
-    let state = GameState {
-        game_id,
-        board,
-        status: "active".to_string(),
-        move_history: Vec::new(),
-        is_player_turn: true,
-    };
-    HttpResponse::Ok().json(state)
-}
-
-async fn reset_game(
+async fn create_new_game(
     data: web::Data<AppState>,
+    req: web::Json<NewGameRequest>,
 ) -> impl Responder {
     let mut engine = data.engine.lock().unwrap();
-    // Reset the engine to starting position
-    *engine = Engine::new();
+    let game_id = uuid::Uuid::new_v4().to_string();
     
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "message": "Game reset to starting position"
-    }))
+    let game_state = StorageGameState {
+        metadata: GameMetadata {
+            game_id: game_id.clone(),
+            mode: GameMode::SinglePlayer,
+            created_at: Utc::now(),
+            last_move_at: Utc::now(),
+            status: GameStatus::Active,
+            total_moves: 0,
+            player_color: req.player_color.clone(),
+            player_name: None,
+            engine_version: "1.0.0".to_string(),
+        },
+        board: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+        move_history: Vec::new(),
+        analysis: None,
+    };
+
+    // Store the game
+    if let Err(e) = data.game_storage.save_game(&game_state) {
+        return HttpResponse::InternalServerError().json(json!({
+            "error": format!("Failed to save game: {}", e)
+        }));
+    }
+
+    HttpResponse::Ok().json(NewGameResponse {
+        game_id,
+        board: game_state.board,
+        status: game_state.metadata.status.to_string(),
+        move_history: game_state.move_history,
+        is_player_turn: req.player_color == "white",
+    })
 }
 
 async fn get_game(
     data: web::Data<AppState>,
-    game_id: web::Path<String>,
+    path: web::Path<String>,
 ) -> impl Responder {
-    let engine = data.engine.lock().unwrap();
-    let board = engine.board();
-    
-    let state = GameState {
-        game_id: game_id.into_inner(),
-        board: board.to_string(),
-        status: if engine.is_game_over() { "game_over".to_string() } else { "active".to_string() },
-        move_history: Vec::new(), // TODO: Track move history
-        is_player_turn: true,
-    };
-    
-    HttpResponse::Ok().json(state)
+    let game_id = path.into_inner();
+    match data.game_storage.load_game(&game_id, &GameMode::SinglePlayer) {
+        Ok(game) => HttpResponse::Ok().json(WebGameState {
+            game_id: game.metadata.game_id,
+            board: game.board,
+            status: game.metadata.status.to_string(),
+            move_history: game.move_history,
+            is_player_turn: true,
+        }),
+        Err(e) => HttpResponse::NotFound().json(json!({
+            "error": format!("Game not found: {}", e)
+        }))
+    }
+}
+
+async fn get_saved_games(data: web::Data<AppState>) -> impl Responder {
+    match data.game_storage.list_games(Some(GameMode::SinglePlayer)) {
+        Ok(games) => {
+            let saved_games: Vec<SavedGame> = games.into_iter()
+                .map(|game| SavedGame {
+                    game_id: game.game_id,
+                    moves: vec![], // TODO: Load moves from game state
+                    result: game.status.to_string(),
+                    timestamp: game.last_move_at.to_rfc3339(),
+                    player_color: game.player_color,
+                })
+                .collect();
+            HttpResponse::Ok().json(saved_games)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(json!({
+            "error": format!("Failed to list games: {}", e)
+        }))
+    }
 }
 
 struct MyWebSocket {
-    _game_id: String,
+    game_id: String,
     engine: web::Data<AppState>,
 }
 
 impl MyWebSocket {
     fn new(game_id: String, engine: web::Data<AppState>) -> Self {
-        Self { _game_id: game_id, engine }
+        Self { game_id, engine }
     }
 
     fn send_game_state(&self, ctx: &mut ws::WebsocketContext<Self>) {
-        if let Ok(engine) = self.engine.engine.lock() {
-            let board = engine.board();
-            let status = match board.status() {
-                BoardStatus::Checkmate => "checkmate",
-                BoardStatus::Stalemate => "stalemate",
-                _ => "active",
+        if let Ok(game_state) = self.engine.game_storage.load_game(&self.game_id, &GameMode::SinglePlayer) {
+            let response = WebGameState {
+                game_id: game_state.metadata.game_id,
+                board: game_state.board,
+                status: game_state.metadata.status.to_string(),
+                move_history: game_state.move_history,
+                is_player_turn: true,
             };
-            let message = serde_json::json!({
-                "type": "status",
-                "payload": {
-                    "board": board.to_string(),
-                    "status": status,
-                }
-            });
-            ctx.text(message.to_string());
+            ctx.text(serde_json::to_string(&response).unwrap());
         }
     }
 }
@@ -316,38 +531,19 @@ impl Actor for MyWebSocket {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        // Reset the engine to starting position for new games
-        if let Ok(mut engine) = self.engine.engine.lock() {
-            engine.reset();
-        }
-        
-        // Send initial game state
         self.send_game_state(ctx);
     }
 }
 
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWebSocket {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
-        match msg {
-            Ok(ws::Message::Ping(msg)) => {
-                ctx.pong(&msg);
-                self.send_game_state(ctx);
-            },
-            Ok(ws::Message::Text(text)) => {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(command) = value.get("command") {
-                        match command.as_str() {
-                            Some("refresh") => self.send_game_state(ctx),
-                            _ => (),
-                        }
-                    }
+        if let Ok(ws::Message::Text(text)) = msg {
+            if let Ok(_move_request) = serde_json::from_str::<MoveRequest>(&text) {
+                if let Ok(_game_state) = self.engine.game_storage.load_game(&self.game_id, &GameMode::SinglePlayer) {
+                    let _engine = self.engine.engine.lock().unwrap();
+                    self.send_game_state(ctx);
                 }
-            },
-            Ok(ws::Message::Close(reason)) => {
-                ctx.close(reason);
-                ctx.stop();
-            },
-            _ => (),
+            }
         }
     }
 }
@@ -358,273 +554,467 @@ async fn ws_route(
     path: web::Path<String>,
     data: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    ws::start(MyWebSocket::new(path.into_inner(), data), &req, stream)
+    let game_id = path.into_inner();
+    let ws = MyWebSocket::new(game_id, data);
+    ws::start(ws, &req, stream)
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    dotenv::dotenv().ok();
-    
-    // Parse command line arguments
-    let args = Args::parse();
-    
-    // Initialize Python interpreter
-    pyo3::prepare_freethreaded_python();
-    
-    println!("Using checkpoint: {}", args.checkpoint);
-    
-    // Set up Python environment
-    let python_src_path = "../python/src";
-    let venv_path = "venvEngine/Lib/site-packages";
-    std::env::set_var("PYTHONPATH", format!("{};{}", python_src_path, venv_path));
-    
-    // Initialize Python with proper model loading
-    let engine = Python::with_gil(|py| {
-        // Add paths to Python sys.path
-        let sys = py.import("sys").unwrap();
-        let sys_path = sys.getattr("path").unwrap();
-        sys_path.call_method1("insert", (0, python_src_path)).unwrap();
-        sys_path.call_method1("insert", (0, venv_path)).unwrap();
-        
-        println!("Python path:");
-        for path_result in sys_path.iter().unwrap() {
-            match path_result {
-                Ok(path) => {
-                    match path.str() {
-                        Ok(path_str) => println!("  {}", path_str),
-                        Err(_) => println!("  <invalid path>"),
-                    }
-                },
-                Err(_) => println!("  <error reading path>"),
-            }
-        }
-        
-        // Try to import torch with error handling
-        println!("Attempting to import PyTorch...");
-        let torch_result = py.import("torch");
-        match torch_result {
-            Ok(torch) => {
-                println!("PyTorch imported successfully");
-                
-                // Try to create the model with error handling
-                match create_model_safely(py, torch, &args.checkpoint) {
-                    Ok(model_bridge) => {
-                        println!("Model created successfully");
-                        rival_ai::Engine::new_with_model(model_bridge)
-                    },
-                    Err(e) => {
-                        println!("Model creation failed: {}. Using fallback model.", e);
-                        create_fallback_engine(py)
-                    }
-                }
-            },
-            Err(e) => {
-                println!("Failed to import PyTorch: {}. Using fallback model.", e);
-                create_fallback_engine(py)
-            }
-        }
-    });
-    
-    // Helper function to create model safely
-    fn create_model_safely(py: Python, torch: &PyModule, checkpoint_path: &str) -> PyResult<rival_ai::ModelBridge> {
-        // Try to create model with automatic device selection
-        println!("Creating model with automatic device selection");
-        
-        // Try to create model directly
-        match create_model_with_device(py, torch, checkpoint_path) {
-            Ok(model_bridge) => {
-                println!("Model created successfully");
-                return Ok(model_bridge);
-            },
-            Err(e) => {
-                println!("Model creation failed: {}. This is unexpected.", e);
-                return Err(e);
-            }
-        }
-    }
-    
-    // Helper function to create model with automatic device selection
-    fn create_model_with_device(py: Python, torch: &PyModule, checkpoint_path: &str) -> PyResult<rival_ai::ModelBridge> {
-        println!("Creating model with automatic device selection");
-        
-        // Check if CUDA is available and select device
-        let device_str = if torch.getattr("cuda")?.getattr("is_available")?.call0()?.extract::<bool>()? {
-            "cuda"
-        } else {
-            "cpu"
-        };
-        let device = torch.getattr("device")?.call1((device_str,))?;
-        println!("Selected device: {}", device_str);
-        
-        // First, ensure chess module is available
-        println!("Importing chess module...");
-        let chess_result = py.import("chess");
-        match chess_result {
-            Ok(_chess) => {
-                println!("Chess module imported successfully");
-            },
-            Err(e) => {
-                println!("Failed to import chess module: {}. This is required for the model.", e);
-                return Err(PyErr::new::<pyo3::exceptions::PyImportError, _>("Chess module not available"));
-            }
-        }
-        
-        // Import model wrapper
-        println!("Importing rival_ai.models.gnn...");
-        let model_wrapper_result = py.import("rival_ai.models.gnn");
-        match model_wrapper_result {
-            Ok(model_wrapper) => {
-                println!("rival_ai.models.gnn imported successfully");
-                
-                // Get the ChessGNN class
-                let model_class_result = model_wrapper.getattr("ChessGNN");
-                match model_class_result {
-                    Ok(model_class) => {
-                        println!("ChessGNN class found");
-                        
-                        // Create model instance
-                        let model_result = model_class.call0();
-                        match model_result {
-                            Ok(model) => {
-                                println!("Model instance created successfully");
-                                
-                                // Move model to the correct device after creation
-                                let to_device_result = model.call_method1("to", (device,));
-                                match to_device_result {
-                                    Ok(model) => {
-                                        println!("Model moved to device successfully");
-                                        
-                                        // Load checkpoint
-                                        let checkpoint_result = torch.getattr("load")?.call1((checkpoint_path,));
-                                        match checkpoint_result {
-                                            Ok(checkpoint) => {
-                                                println!("Checkpoint loaded successfully");
-                                                
-                                                // Load state dict
-                                                let model_state_dict = checkpoint.get_item("model_state_dict")?;
-                                                let load_result = model.call_method1("load_state_dict", (model_state_dict,));
-                                                match load_result {
-                                                    Ok(_) => {
-                                                        println!("State dict loaded successfully");
-                                                        
-                                                        // Set to evaluation mode
-                                                        let eval_result = model.call_method0("eval");
-                                                        match eval_result {
-                                                            Ok(_) => {
-                                                                println!("Model set to evaluation mode");
-                                                                
-                                                                // Create ModelBridge from the Python model
-                                                                Ok(rival_ai::ModelBridge::new(model.into(), Some(device_str.to_string())))
-                                                            },
-                                                            Err(e) => {
-                                                                println!("Failed to set model to evaluation mode: {}", e);
-                                                                Err(e)
-                                                            }
-                                                        }
-                                                    },
-                                                    Err(e) => {
-                                                        println!("Failed to load state dict: {}", e);
-                                                        Err(e)
-                                                    }
-                                                }
-                                            },
-                                            Err(e) => {
-                                                println!("Failed to load checkpoint: {}", e);
-                                                Err(e)
-                                            }
-                                        }
-                                    },
-                                    Err(e) => {
-                                        println!("Failed to move model to device: {}", e);
-                                        Err(e)
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                println!("Failed to create model instance: {}", e);
-                                Err(e)
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        println!("Failed to get ChessGNN class: {}", e);
-                        Err(e)
-                    }
-                }
-            },
-            Err(e) => {
-                println!("Failed to import rival_ai.models.gnn: {}", e);
-                Err(e)
-            }
-        }
-    }
-    
-    // Helper function to create fallback engine
-    fn create_fallback_engine(py: Python) -> rival_ai::Engine {
-        println!("Creating fallback engine with random move generator");
-        
-        // Create a simple fallback model that returns random moves
-        let code = r#"
-import random
-import chess
+fn save_game(state: &AppState, game_id: &str, moves: Vec<String>, result: &str) {
+    let game_state = StorageGameState {
+        metadata: GameMetadata {
+            game_id: game_id.to_string(),
+            mode: GameMode::SinglePlayer,
+            created_at: Utc::now(),
+            last_move_at: Utc::now(),
+            status: GameStatus::from(result),
+            total_moves: moves.len(),
+            player_color: "white".to_string(),
+            player_name: None,
+            engine_version: "1.0.0".to_string(),
+        },
+        board: "".to_string(), // TODO: Store final board position
+        move_history: moves,
+        analysis: None,
+    };
 
+    if let Err(e) = state.game_storage.save_game(&game_state) {
+        eprintln!("Failed to save game: {}", e);
+    }
+}
+
+// Helper function to create model with device selection
+fn create_model_with_device(py: Python, torch: &PyModule, model_path: &str) -> PyResult<ModelBridge> {
+    let device = if torch.getattr("cuda")?.call_method0("is_available")?.extract::<bool>()? {
+        Some("cuda".to_string())
+    } else {
+        Some("cpu".to_string())
+    };
+    
+    let code = format!(r#"
+import torch
+import chess
+from rival_ai.models import ChessGNN
+from rival_ai.pag import PositionalAdjacencyGraph
+import numpy as np
+
+class ModelWrapper:
+    def __init__(self):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = ChessGNN(hidden_dim=256, num_layers=4, num_heads=4, dropout=0.1)
+        
+        try:
+            checkpoint = torch.load('{}', map_location=self.device)
+            if 'model_state_dict' in checkpoint:
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                self.model.load_state_dict(checkpoint)
+            print(f"Loaded model from {model_path}")
+        except Exception as e:
+            print(f"Failed to load model from {model_path}: {{e}}")
+            print("Using randomly initialized model")
+            
+        self.model.to(self.device)
+        self.model.eval()
+"#, model_path.replace("\\", "\\\\"));
+
+    let locals = PyDict::new(py);
+    locals.set_item("torch", torch)?;
+    py.run(&code, Some(locals), None)?;
+    let model = py.eval("ModelWrapper()", Some(locals), None)?;
+    
+    if device == Some("cuda".to_string()) {
+        model.call_method1("to", ("cuda",))?;
+    }
+    
+    Ok(ModelBridge::new(model.into_py(py), device))
+}
+
+// Helper function to create fallback engine
+fn create_fallback_engine(py: Python) -> Engine {
+    let code = r#"
 class FallbackModel:
     def __init__(self):
-        self.name = "Fallback Random Model"
+        self.device = 'cpu'
     
     def predict_with_board(self, board_fen):
-        board = chess.Board(board_fen)
-        legal_moves = list(board.legal_moves)
-        if legal_moves:
-            move = random.choice(legal_moves)
-            # Create a dummy policy vector (all zeros except for the chosen move)
-            policy = [0.0] * 5312  # Total number of possible moves
-            # Set a high probability for the chosen move (simplified)
-            policy[0] = 1.0
-            return (policy, 0.0)  # Return policy and value
         return ([0.0] * 5312, 0.0)
     
     def eval(self):
         pass
-
-FallbackModel()
-"#;
-        
-        let locals = PyDict::new(py);
-        py.run(code, None, Some(locals)).unwrap();
-        let fallback_model = locals.get_item("FallbackModel").unwrap().call0().unwrap();
-        
-        // Create ModelBridge from the fallback model
-        let model_bridge = rival_ai::ModelBridge::new(fallback_model.into(), Some("cpu".to_string()));
-        
-        // Create Engine with the fallback model
-        rival_ai::Engine::new_with_model(model_bridge)
-    }
     
-    let app_state = web::Data::new(AppState {
-        engine: Mutex::new(engine),
+    def to(self, device):
+        self.device = device
+        return self
+"#;
+    let locals = PyDict::new(py);
+    py.run(code, Some(locals), None).unwrap();
+    let model = py.eval("FallbackModel()", Some(locals), None).unwrap();
+    Engine::new_with_model(ModelBridge::new(model.into_py(py), Some("cpu".to_string())))
+}
+
+// Endpoints
+async fn start_community_game(data: web::Data<AppState>) -> impl Responder {
+    let mut game = data.game.lock().unwrap();
+    *game = CommunityGame::new();
+    
+    let response = CommunityGameStateResponse {
+        game_id: "community".to_string(),
+        board: game.board.to_string(),
+        status: game.status.to_string(),
+        move_history: game.move_history.clone(),
+        is_voting_phase: game.is_voting_phase(),
+        voting_ends_at: game.voting_ends_at.map(|t| t.to_rfc3339()),
+        current_votes: game.votes.iter().map(|(k, v)| (k.clone(), v.len())).collect(),
+        total_voters: game.votes.values().map(|v| v.len()).sum(),
+        your_vote: None,
+    };
+
+    HttpResponse::Ok().json(response)
+}
+
+async fn get_community_game_state(
+    data: web::Data<AppState>, 
+    voter_id: Option<web::Query<String>>
+) -> impl Responder {
+    let voter_id = voter_id.as_ref().map(|id| id.as_str().to_string());
+    let game = data.game.lock().unwrap();
+    
+    let current_votes: HashMap<String, usize> = game.votes.iter()
+        .map(|(mv, voters)| (mv.clone(), voters.len()))
+        .collect();
+
+    let total_voters: usize = game.votes.values()
+        .map(|voters| voters.len())
+        .sum();
+
+    let your_vote = voter_id.and_then(|id| {
+        game.votes.iter()
+            .find(|(_, voters)| voters.contains(&id))
+            .map(|(mv, _)| mv.clone())
     });
 
-    println!("Starting RivalAI server on http://{}:{}", args.host, args.port);
+    HttpResponse::Ok().json(CommunityGameStateResponse {
+        game_id: "community".to_string(),
+        board: game.board.to_string(),
+        status: game.status.to_string(),
+        move_history: game.move_history.clone(),
+        is_voting_phase: game.is_voting_phase(),
+        voting_ends_at: game.voting_ends_at.map(|t| t.to_rfc3339()),
+        current_votes,
+        total_voters,
+        your_vote,
+    })
+}
+
+async fn vote_move(
+    data: web::Data<AppState>,
+    req: web::Json<VoteRequest>,
+) -> impl Responder {
+    let mut game = data.game.lock().unwrap();
+    let mut engine = data.engine.lock().unwrap();
+
+    match game.add_vote(&req.move_str, &req.voter_id) {
+        Ok(()) => {
+            if let Err(e) = game.process_votes(&mut engine) {
+                return HttpResponse::BadRequest().json(json!({
+                    "success": false,
+                    "error_message": e,
+                }));
+            }
+
+            let response = VoteResponse {
+                success: true,
+                error_message: None,
+                game_state: CommunityGameStateResponse {
+                    game_id: "community".to_string(),
+                    board: game.board.to_string(),
+                    status: game.status.to_string(),
+                    move_history: game.move_history.clone(),
+                    is_voting_phase: game.is_voting_phase(),
+                    voting_ends_at: game.voting_ends_at.map(|t| t.to_rfc3339()),
+                    current_votes: game.votes.iter().map(|(k, v)| (k.clone(), v.len())).collect(),
+                    total_voters: game.votes.values().map(|v| v.len()).sum(),
+                    your_vote: Some(req.move_str.clone()),
+                },
+            };
+
+            HttpResponse::Ok().json(response)
+        }
+        Err(e) => HttpResponse::BadRequest().json(json!({
+            "success": false,
+            "error_message": e,
+        })),
+    }
+}
+
+async fn get_game_state(data: web::Data<AppState>) -> impl Responder {
+    let game = data.game.lock().unwrap();
+    let _engine = data.engine.lock().unwrap();
+    
+    web::Json(json!({
+        "board": game.board.to_string(),
+        "move_history": game.move_history,
+        "is_voting_phase": game.is_voting_phase(),
+        "status": game.status,
+    }))
+}
+
+async fn submit_vote(
+    data: web::Data<AppState>,
+    req: web::Json<VoteRequest>,
+) -> impl Responder {
+    let mut game = data.game.lock().unwrap();
+    let mut engine = data.engine.lock().unwrap();
+
+    match game.add_vote(&req.move_str, &req.voter_id) {
+        Ok(_) => {
+            if let Err(e) = game.process_votes(&mut engine) {
+                return HttpResponse::BadRequest().json(json!({
+                    "error": format!("Failed to process votes: {}", e)
+                }));
+            }
+            
+            HttpResponse::Ok().json(json!({
+                "board": game.board.to_string(),
+                "move_history": game.move_history.clone(),
+                "is_voting_phase": game.is_voting_phase(),
+                "status": game.status,
+            }))
+        }
+        Err(e) => HttpResponse::BadRequest().json(json!({
+            "error": e
+        }))
+    }
+}
+
+async fn list_games(data: web::Data<AppState>) -> impl Responder {
+    match data.game_storage.list_games(None) {
+        Ok(games) => {
+            let saved_games: Vec<SavedGame> = games.into_iter()
+                .map(|game| SavedGame {
+                    game_id: game.game_id,
+                    moves: Vec::new(), // Empty vector since move_history is not in metadata
+                    result: game.status.to_string(),
+                    timestamp: game.last_move_at.to_rfc3339(),
+                    player_color: game.player_color,
+                })
+                .collect();
+            HttpResponse::Ok().json(saved_games)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(json!({
+            "error": format!("Failed to list games: {}", e)
+        }))
+    }
+}
+
+async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
+    match data.game_storage.list_games(None) {
+        Ok(games) => {
+            let mut wins = 0;
+            let mut losses = 0;
+            let mut draws = 0;
+
+            for game in games {
+                match game.status {
+                    GameStatus::WhiteWins => {
+                        if game.player_color == "white" {
+                            wins += 1;
+                        } else {
+                            losses += 1;
+                        }
+                    },
+                    GameStatus::BlackWins => {
+                        if game.player_color == "black" {
+                            wins += 1;
+                        } else {
+                            losses += 1;
+                        }
+                    },
+                    GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+                    GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves => {
+                        draws += 1;
+                    },
+                    _ => {}
+                }
+            }
+
+            HttpResponse::Ok().json(ModelStatsResponse {
+                wins,
+                losses,
+                draws,
+            })
+        },
+        Err(e) => {
+            eprintln!("Failed to get model stats: {}", e);
+            HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to get model stats: {}", e)
+            }))
+        }
+    }
+}
+
+async fn get_leaderboard(data: web::Data<AppState>) -> impl Responder {
+    match data.game_storage.list_games(None) {
+        Ok(games) => {
+            let mut player_stats: HashMap<String, (i32, i32, i32)> = HashMap::new(); // (wins, losses, draws)
+
+            for game in games {
+                let player_name = game.player_name.unwrap_or_else(|| "Anonymous".to_string());
+                let stats = player_stats.entry(player_name).or_insert((0, 0, 0));
+
+                match game.status {
+                    GameStatus::WhiteWins => {
+                        if game.player_color == "white" {
+                            stats.0 += 1;
+                        } else {
+                            stats.1 += 1;
+                        }
+                    },
+                    GameStatus::BlackWins => {
+                        if game.player_color == "black" {
+                            stats.0 += 1;
+                        } else {
+                            stats.1 += 1;
+                        }
+                    },
+                    GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+                    GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves => {
+                        stats.2 += 1;
+                    },
+                    _ => {}
+                }
+            }
+
+            let mut leaderboard: Vec<LeaderboardEntry> = player_stats.into_iter()
+                .map(|(name, (wins, losses, draws))| {
+                    LeaderboardEntry {
+                        name,
+                        wins,
+                        losses,
+                        draws,
+                        rank: 0,  // Will be set below
+                    }
+                })
+                .collect();
+
+            // Sort by win percentage
+            leaderboard.sort_by(|a, b| {
+                let a_total = a.wins + a.losses + a.draws;
+                let b_total = b.wins + b.losses + b.draws;
+                let a_winrate = if a_total > 0 { (a.wins as f32) / (a_total as f32) } else { 0.0 };
+                let b_winrate = if b_total > 0 { (b.wins as f32) / (b_total as f32) } else { 0.0 };
+                b_winrate.partial_cmp(&a_winrate).unwrap()
+            });
+
+            // Set ranks
+            for (i, entry) in leaderboard.iter_mut().enumerate() {
+                entry.rank = (i + 1) as i32;
+            }
+
+            HttpResponse::Ok().json(leaderboard)
+        },
+        Err(e) => HttpResponse::InternalServerError().json(json!({
+            "error": format!("Failed to get leaderboard: {}", e)
+        }))
+    }
+}
+
+#[derive(Serialize)]
+struct ModelStatsResponse {
+    wins: i32,
+    losses: i32,
+    draws: i32,
+}
+
+#[derive(Serialize)]
+struct LeaderboardEntry {
+    rank: i32,
+    name: String,
+    wins: i32,
+    losses: i32,
+    draws: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NewGameRequest {
+    player_color: String,
+}
+
+#[derive(Serialize)]
+struct NewGameResponse {
+    game_id: String,
+    board: String,
+    status: String,
+    move_history: Vec<String>,
+    is_player_turn: bool,
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
+    let args = Args::parse();
+    let games_dir = Path::new(&args.games_dir);
+    if !games_dir.exists() {
+        fs::create_dir_all(games_dir)?;
+    }
+
+    // Initialize Python
+    pyo3::prepare_freethreaded_python();
+
+    // Initialize engine
+    let engine = Python::with_gil(|py| {
+        match py.import("torch") {
+            Ok(torch) => {
+                match create_model_with_device(py, torch, &args.model_path) {
+                    Ok(model) => Engine::new_with_model(model),
+                    Err(e) => {
+                        eprintln!("Failed to create model: {}", e);
+                        create_fallback_engine(py)
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to import torch: {}", e);
+                create_fallback_engine(py)
+            }
+        }
+    });
+
+    let game_storage = Arc::new(GameStorage::new(games_dir)?);
+    let host = args.host.clone();
+    let port = args.port;
+
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
-            .allow_any_header()
-            .max_age(3600);
+            .allow_any_header();
 
         App::new()
             .wrap(cors)
-            .wrap(middleware::Logger::default())
-            .app_data(app_state.clone())
-            .route("/api/games/{game_id}/moves", web::post().to(make_move))
-            .route("/api/games/{game_id}/engine-move", web::post().to(engine_move))
-            .route("/api/games", web::post().to(create_game))
-            .route("/api/games/{game_id}", web::get().to(get_game))
-            .route("/api/games/{game_id}/reset", web::post().to(reset_game))
-            .route("/ws/{game_id}", web::get().to(ws_route))
+            .wrap(Logger::default())
+            .app_data(web::Data::new(AppState {
+                game: Arc::new(Mutex::new(CommunityGame::new())),
+                game_storage: game_storage.clone(),
+                engine: Arc::new(Mutex::new(engine.clone())),
+            }))
+            .service(web::resource("/ws").route(web::get().to(ws_route)))
+            .service(web::resource("/game").route(web::get().to(get_game_state)))
+            .service(web::resource("/move/new").route(web::post().to(create_new_game)))
+            .service(web::resource("/move/{id}").route(web::post().to(make_move)))
+            .service(web::resource("/api/community/state").route(web::get().to(get_community_game_state)))
+            .service(web::resource("/api/community/vote").route(web::post().to(vote_move)))
+            .service(web::resource("/api/community/start").route(web::post().to(start_community_game)))
+            .service(web::resource("/games").route(web::get().to(list_games)))
+            .service(web::resource("/games/{id}").route(web::get().to(get_game)))
+            .service(web::resource("/stats").route(web::get().to(get_model_stats)))
+            .service(web::resource("/leaderboard").route(web::get().to(get_leaderboard)))
     })
-    .bind(format!("{}:{}", args.host, args.port))?
+    .bind((args.host, port))?
     .run()
-    .await
+    .await?;
+
+    println!("Server running at http://{}:{}", host, port);
+    Ok(())
 } 
