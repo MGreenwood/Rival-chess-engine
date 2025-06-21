@@ -155,6 +155,17 @@ const useStore = create<StoreState>((set, get) => {
               }
             };
             set({ currentGame: newGameState, loading: false });
+            
+            // If game ended, refresh stats (which will also refresh recent games)
+            if (response.data.status !== 'active') {
+              console.log('Game ended, refreshing stats and recent games...');
+              try {
+                // loadStatsForMode already refreshes recent games, so just call that
+                await get().uiActions.loadStatsForMode(get().currentMode);
+              } catch (refreshError) {
+                console.warn('Failed to refresh stats after game end:', refreshError);
+              }
+            }
           } else if (response.data.error_message) {
             set({ loading: false });
             throw new Error(response.data.error_message);
@@ -342,6 +353,14 @@ const useStore = create<StoreState>((set, get) => {
                 if (refreshResponse.data[statsKey] && refreshResponse.data[statsKey].total_games > 0) {
                   console.log('Stats refresh successful!');
                   set({ modelStats: refreshResponse.data[statsKey] });
+                  
+                  // Also refresh recent games when stats are refreshed
+                  try {
+                    const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+                    set({ recentGames: recentGamesResponse.data });
+                  } catch (recentGamesError) {
+                    console.warn('Failed to refresh recent games:', recentGamesError);
+                  }
                   return;
                 }
               } catch (refreshError) {
@@ -360,6 +379,14 @@ const useStore = create<StoreState>((set, get) => {
                 win_rate: 0.0
               }
             });
+          }
+          
+          // Always refresh recent games when loading stats for a mode
+          try {
+            const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+            set({ recentGames: recentGamesResponse.data });
+          } catch (recentGamesError) {
+            console.warn('Failed to load recent games:', recentGamesError);
           }
         } catch (error) {
           console.error('Failed to load stats for mode:', mode, error);
@@ -401,7 +428,7 @@ const useStore = create<StoreState>((set, get) => {
 
           // Load recent games
           try {
-            const response = await axios.get(`${API_BASE_URL}/games`);
+            const response = await axios.get(`${API_BASE_URL}/recent-games`);
             set({ recentGames: response.data });
 
             // Load current game if there's an active one

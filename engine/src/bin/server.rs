@@ -1188,7 +1188,7 @@ class UltraDenseModelWrapper:
         try:
             # For now, use uniform policy since we need proper board conversion
             # TODO: Implement proper board -> model input conversion
-            print(f"🎯 Predicting for position: {{board_fen[:20]}}...")
+            # print(f"🎯 Predicting for position: {{board_fen[:20]}}...")  # Removed verbose logging
             
             # Basic prediction (uniform policy for now)
             policy = [1.0/5312] * 5312  
@@ -1555,6 +1555,64 @@ async fn list_games(data: web::Data<AppState>) -> impl Responder {
         }
         Err(e) => HttpResponse::InternalServerError().json(json!({
             "error": format!("Failed to list games: {}", e)
+        }))
+    }
+}
+
+async fn get_recent_games(data: web::Data<AppState>) -> impl Responder {
+    match data.game_storage.list_games(None) {
+        Ok(games) => {
+            let mut recent_games = Vec::new();
+            
+            for metadata in games {
+                // Convert GameStatus to string and mode to string for frontend
+                let mode_str = match metadata.mode {
+                    GameMode::SinglePlayer => "single",
+                    GameMode::Community => "community", 
+                    GameMode::UCI => "single", // UCI games show as single-player in UI
+                };
+                
+                let status_str = match metadata.status {
+                    GameStatus::Active => "active",
+                    GameStatus::Waiting => "waiting",
+                    GameStatus::WhiteWins => "white_wins",
+                    GameStatus::BlackWins => "black_wins",
+                    GameStatus::DrawStalemate => "draw_stalemate", 
+                    GameStatus::DrawInsufficientMaterial => "draw_insufficient_material",
+                    GameStatus::DrawRepetition => "draw_repetition",
+                    GameStatus::DrawFiftyMoves => "draw_fifty_moves",
+                };
+                
+                // Use total_moves from metadata (already available, no need to load full game)
+                let total_moves = metadata.total_moves;
+                
+                recent_games.push(json!({
+                    "game_id": metadata.game_id,
+                    "mode": mode_str,
+                    "created_at": metadata.created_at.to_rfc3339(),
+                    "last_move_at": metadata.last_move_at.to_rfc3339(),
+                    "status": status_str,
+                    "total_moves": total_moves,
+                    "player_color": metadata.player_color,
+                    "player_name": metadata.player_name,
+                    "engine_version": metadata.engine_version,
+                }));
+            }
+            
+            // Sort by last_move_at descending (most recent first)
+            recent_games.sort_by(|a, b| {
+                let a_time = a["last_move_at"].as_str().unwrap_or("");
+                let b_time = b["last_move_at"].as_str().unwrap_or("");
+                b_time.cmp(a_time)
+            });
+            
+            // Limit to last 50 games for performance
+            recent_games.truncate(50);
+            
+            HttpResponse::Ok().json(recent_games)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(json!({
+            "error": format!("Failed to get recent games: {}", e)
         }))
     }
 }
@@ -2143,6 +2201,7 @@ class UltraDenseFallbackModel:
                 .service(web::resource("/api/community/start-voting").route(web::post().to(start_voting_round)))
                 .service(web::resource("/api/community/force-resolve").route(web::post().to(force_resolve_voting)))
                 .service(web::resource("/games").route(web::get().to(list_games)))
+                .service(web::resource("/recent-games").route(web::get().to(get_recent_games)))
                 .service(web::resource("/games/{id}").route(web::get().to(get_game)))
                 .service(web::resource("/stats").route(web::get().to(get_model_stats)))
                 .service(web::resource("/stats/refresh").route(web::post().to(refresh_stats)))

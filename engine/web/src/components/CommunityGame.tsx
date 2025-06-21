@@ -154,9 +154,13 @@ export const CommunityGame: React.FC = () => {
       setTimeLeft(diff);
       
       // Detect if timer has been stuck at 0 for too long
-      if (diff <= 0 && gameState?.is_voting_phase) {
-        console.log('Voting phase should have ended, timer expired');
+      // BUT don't flag as broken if engine is thinking (that's normal after voting ends)
+      if (diff <= 0 && gameState?.is_voting_phase && !gameState?.engine_thinking) {
+        console.log('Voting phase should have ended, timer expired, and engine is not thinking');
         setIsTimerBroken(true);
+      } else if (gameState?.engine_thinking) {
+        // Clear broken state if engine starts thinking (this is normal progression)
+        setIsTimerBroken(false);
       }
     };
 
