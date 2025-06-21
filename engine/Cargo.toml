@@ -50,11 +50,17 @@ actix-files = "0.6.5"
 # Optional Python dependencies
 pyo3 = { version = "0.19", features = ["extension-module"] }
 numpy = "0.19"
+actix-web-httpauth = "0.8"
+jsonwebtoken = "9.2"
 
 # Development dependencies
 [dev-dependencies]
 criterion = "0.5"  # For benchmarking
 pretty_assertions = "1.4"  # For better test output
+
+# Security dependencies
+jsonwebtoken = "9.2"
+actix-web-httpauth = "0.8"
 
 [lib]
 name = "rival_ai"

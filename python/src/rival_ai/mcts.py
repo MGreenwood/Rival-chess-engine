@@ -129,8 +129,10 @@ class MCTS:
         self.streams = [torch.cuda.Stream() for _ in range(config.num_parallel_streams)]
         
         # Initialize scaler for mixed precision
-        if config.use_amp:
+        if config.use_amp and torch.cuda.is_available() and hasattr(torch.amp, 'GradScaler'):
             self.scaler = torch.amp.GradScaler()
+        else:
+            self.scaler = None
             
         # Initialize random state for consistent hashing
         self._init_hash_keys()

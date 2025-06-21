@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useStore } from '../store/store';
+import useStore from '../store/store';
 import type { AnalysisResult } from '../store/types';
 
 interface AnalysisHook {
@@ -14,9 +14,19 @@ interface AnalysisHook {
 export function useAnalysis(): AnalysisHook {
   const {
     currentAnalysis,
-    analysisHistory,
-    analysisActions
+    analysisHistory = [],
+    // analysisActions not available in current store
   } = useStore();
+
+  const analyzePosition = async (fen: string) => {
+    // TODO: Implement analysis
+    console.log('Analyzing position:', fen);
+  };
+
+  const clearAnalysis = () => {
+    // TODO: Implement clear analysis
+    console.log('Clearing analysis');
+  };
 
   const getFormattedEvaluation = useCallback(() => {
     if (!currentAnalysis) return '0.0';
@@ -38,11 +48,11 @@ export function useAnalysis(): AnalysisHook {
   }, [currentAnalysis]);
 
   return {
-    currentAnalysis,
+    currentAnalysis: currentAnalysis || null,
     analysisHistory,
     isAnalyzing: false, // TODO: Add loading state to store
-    analyzePosition: analysisActions.analyzePosition,
-    clearAnalysis: analysisActions.clearAnalysis,
+    analyzePosition,
+    clearAnalysis,
     getFormattedEvaluation
   };
 } 

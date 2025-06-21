@@ -1,0 +1,15 @@
+# Cloudflare tunnel generated files
+# These files contain sensitive credentials and should not be committed
+
+# Tunnel credentials
+*.json
+
+# Generated tunnel config (after setup)
+tunnel-config-generated.yml
+
+# Cloudflared logs
+*.log
+
+# OS specific files
+.DS_Store
+Thumbs.db 

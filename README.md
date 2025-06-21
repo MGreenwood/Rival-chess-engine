@@ -8,18 +8,81 @@ A novel chess engine implementing the Chess Heterogeneous Encoding State System 
 rival_ai/
 ├── engine/           # Rust core engine
 │   ├── src/         # Core chess logic and implementation
+│   │   ├── game_storage.rs  # Game persistence system
+│   │   ├── mcts.rs         # Monte Carlo Tree Search
+│   │   ├── pag/           # Position Analysis Graph
+│   │   └── bin/          # Binary executables
 │   ├── examples/    # Example usage and tests
 │   └── web/         # Web interface components
-├── python/          # Python training and analysis
-│   ├── src/        # Core Python implementation
-│   ├── scripts/    # Training and utility scripts
-│   └── analysis/   # Analysis tools and notebooks
-├── analysis/        # Project-wide analysis tools
-├── scripts/         # Utility scripts
-├── experiments/     # Training experiment outputs
-├── self_play_data/ # Generated self-play games
-└── logs/           # Training and runtime logs
+│       ├── src/    # React frontend
+│       │   ├── components/  # UI components
+│       │   │   ├── Chessboard.tsx    # Chess board visualization
+│       │   │   ├── CommunityGame.tsx # Community voting interface
+│       │   │   └── ModelStats.tsx    # Engine statistics
+│   ├── python/          # Python training and analysis
+│   │   ├── src/        # Core Python implementation
+│   │   ├── scripts/    # Training and utility scripts
+│   │   └── analysis/   # Analysis tools and notebooks
+│   ├── analysis/        # Project-wide analysis tools
+│   ├── scripts/         # Utility scripts
+│   ├── experiments/     # Training experiment outputs
+│   └── self_play_data/ # Generated self-play games
+│   └── logs/           # Training and runtime logs
 ```
+
+## Game Modes
+
+RivalAI now supports two distinct game modes:
+
+### 1. Single Player Mode
+- Traditional one-on-one gameplay against the AI
+- Full engine strength with MCTS and neural network evaluation
+- Move history and analysis
+- Game state persistence
+- Customizable player color
+
+### 2. Community Mode
+- Collaborative gameplay where multiple players vote on moves
+- 10-second voting window for each move
+- Real-time vote tallying
+- Move suggestions from all connected players
+- Random selection between tied moves
+- Ability to change votes during voting window
+- Game state persistence with voting history
+
+## Game Storage System
+
+RivalAI implements a robust game storage system that preserves game states and supports multiple game modes:
+
+### Storage Structure
+```
+games/
+├── single_player/   # Single player game files
+│   └── [game_id].json
+└── community/       # Community game files
+    └── [game_id].json
+```
+
+### Game Metadata
+Each saved game includes:
+- Game ID (UUID)
+- Game mode (single/community)
+- Creation timestamp
+- Last move timestamp
+- Game status
+- Total moves
+- Player color
+- Player name (optional)
+- Engine version
+
+### Features
+- Automatic game state persistence
+- Game resume capability
+- Historical game browsing
+- Mode-specific storage
+- Rich game metadata
+- Efficient JSON storage
+- Directory-based organization
 
 ## Model Architecture
 
@@ -287,4 +350,43 @@ See [DESIGN.md](DESIGN.md) for detailed architecture documentation and [MILESTON
 
 ## License
 
-MIT License - See LICENSE file for details 
+MIT License - See LICENSE file for details
+
+## Web Interface
+
+The web interface provides a rich user experience with:
+
+### Common Features
+- Interactive chessboard
+- Move validation
+- Game controls
+- Theme customization
+- Model statistics
+- Move history
+
+### Single Player Features
+- Direct gameplay against AI
+- Move analysis
+- Game state tracking
+- Position evaluation
+
+### Community Mode Features
+- Real-time vote display
+- Countdown timer
+- Vote statistics
+- Move suggestions
+- Vote modification
+- Game state synchronization
+
+## API Endpoints
+
+### Game Management
+- `POST /api/move/{game_id}` - Make a move in single player mode
+- `GET /api/games` - List all saved games
+- `GET /api/games/{mode}/{game_id}` - Load a specific game
+- `DELETE /api/games/{mode}/{game_id}` - Delete a game
+
+### Community Mode
+- `POST /api/community/start` - Start a new community game
+- `POST /api/community/vote` - Submit or update a vote
+- `GET /api/community/state` - Get current game state 

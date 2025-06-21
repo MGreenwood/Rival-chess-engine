@@ -4,9 +4,13 @@ use std::str::FromStr;
 
 pub mod bridge;
 pub mod engine;
+pub mod game_storage;
+pub mod mcts;
 
 pub use engine::Engine;
 pub use bridge::python::ModelBridge;
+pub use game_storage::{GameStorage, GameState, GameMode, GameStatus, GameMetadata};
+pub use mcts::{MCTS, MCTSConfig};
 
 #[pyclass]
 pub struct PyEngine {

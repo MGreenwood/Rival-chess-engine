@@ -33,6 +33,9 @@ RivalAI is a sophisticated chess AI system that combines traditional chess engin
 - Game state synchronization
 - Model statistics tracking
 - User preferences persistence
+- Multi-mode game state handling
+- Persistent storage system
+- Game history management
 
 ### 2. User Interface Components
 - Interactive chessboard with move validation
@@ -44,6 +47,10 @@ RivalAI is a sophisticated chess AI system that combines traditional chess engin
   - Player leaderboard
 - Game controls with connection status
 - Theme-aware settings panel
+- Community voting interface
+- Real-time vote display
+- Game mode selector
+- Move history browser
 
 ### 3. Real-time Features
 - Live game state updates
@@ -51,6 +58,61 @@ RivalAI is a sophisticated chess AI system that combines traditional chess engin
 - Connection status indicator
 - Game history tracking
 - Player statistics
+- Vote synchronization
+- Countdown timer
+- Move validation
+- Vote tallying
+
+### 4. Game Modes
+#### Single Player Mode
+- Traditional chess gameplay
+- Direct engine interaction
+- Move validation and analysis
+- Game state persistence
+- Position evaluation
+- Move history tracking
+
+#### Community Mode
+- Collaborative gameplay
+- Real-time voting system
+- Vote management
+- Move suggestion aggregation
+- Tie-breaking mechanism
+- Vote modification support
+- Game state synchronization
+- Vote history tracking
+
+### 5. Storage System
+#### Architecture
+- Mode-specific storage directories
+- JSON-based game state persistence
+- UUID-based game identification
+- Rich metadata storage
+- Efficient file organization
+- Game resume capability
+- History browsing support
+
+#### Game State Structure
+- Game metadata
+  - Game ID
+  - Game mode
+  - Timestamps
+  - Status
+  - Move count
+  - Player information
+  - Engine version
+- Board state
+- Move history
+- Analysis data (optional)
+- Vote data (community mode)
+
+#### Performance Considerations
+- Efficient file I/O
+- Minimal memory footprint
+- Quick state retrieval
+- Atomic file operations
+- Concurrent access handling
+- Cache-friendly design
 
 ### 4. Theme System
 - Light/dark mode support

@@ -3,7 +3,35 @@ import axios from 'axios';
 import type { GameState, GameStatus, MoveRequest, MoveResponse, GameSettings, WebSocketMessage } from '../types/chess';
 import useStore from '../store/store';
 
-const API_BASE_URL = 'http://localhost:3000/api';
+// Dynamic API base URL - inline to avoid import issues
+const getApiBaseUrl = (): string => {
+  const host = window.location.host;
+  const protocol = window.location.protocol; // Use current protocol
+  
+  // If accessing via localhost, use localhost:3000 with current protocol
+  if (host.includes('localhost') || host.includes('127.0.0.1')) {
+    return `${protocol}//localhost:3000`;
+  }
+  
+  // Otherwise use the current protocol and host (tunnel)
+  return `${protocol}//${host}`;
+};
+
+const API_BASE_URL = getApiBaseUrl();
+
+// Dynamic WebSocket URL based on current host
+const getWebSocketURL = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  
+  // If accessing via localhost, use localhost:3000 with appropriate WebSocket protocol
+  if (host.includes('localhost') || host.includes('127.0.0.1')) {
+    return `${protocol}//localhost:3000/ws`;
+  }
+  
+  // Otherwise use the current host with /ws path (tunnel)
+  return `${protocol}//${host}/ws`;
+};
 
 export function useGame(initialSettings?: GameSettings) {
   const [gameState, setGameState] = useState<GameState | null>(null);
@@ -39,7 +67,7 @@ export function useGame(initialSettings?: GameSettings) {
         wsRef.current.close(1000, 'Switching to new game');
     }
 
-    const wsUrl = `ws://localhost:3000/ws/${gameId}`;
+    const wsUrl = `${getWebSocketURL()}/${gameId}`;
     console.log('[connectWebSocket] Connecting to WebSocket URL:', wsUrl);
     const socket = new WebSocket(wsUrl);
 
@@ -158,8 +186,8 @@ const startNewGame = useCallback(async () => {
       wsRef.current = null;
     }
     const response = await axios.post<GameState>(
-      `${API_BASE_URL}/game`,
-      initialSettings ?? {},
+      `${API_BASE_URL}/move/new`,
+      { player_color: 'white' },
       { headers: { 'Content-Type': 'application/json' } }
     );
     console.log('New game started:', response.data);
@@ -185,55 +213,39 @@ const makeMove = useCallback(async (move: string) => {
   try {
     setLoading(true);
     setError(null);
-    // 1. Send move to backend
+    
+    // Send move to backend - server expects game_id in the request body
     const response = await axios.post<MoveResponse>(
-      `${API_BASE_URL}/game/${gameState.game_id}/move`,
-      { move_str: move } as MoveRequest
+      `${API_BASE_URL}/move`,
+      { 
+        move_str: move,
+        game_id: gameState.game_id,
+        board: gameState.board,
+        player_color: 'white'  // Add this if needed
+      } as MoveRequest
     );
     console.log('Move response:', response.data);
 
     if (response.data.success) {
-      // Optimistically update the board and set is_player_turn to false
+      // Update the board with the response
       setGameStateWithLog(prev => {
         const newState = prev ? {
           ...prev,
           board: response.data.board,
-          status: response.data.status,
-          is_player_turn: false,
-          move_history: [...prev.move_history, move],
+          status: response.data.status as GameStatus,
+          is_player_turn: response.data.is_player_turn,
+          // Keep existing move_history since MoveResponse doesn't include it
         } : null;
         return newState;
       });
     } else {
-      throw new Error('Invalid move');
-    }
-
-    // 2. Call engine-move endpoint
-    const engineResponse = await axios.post<MoveResponse>(
-      `${API_BASE_URL}/game/${gameState.game_id}/engine_move`
-    );
-    console.log('Engine move response:', engineResponse.data);
-    if (engineResponse.data.success) {
-      setGameStateWithLog(prev => {
-        const newState = prev ? {
-          ...prev,
-          board: engineResponse.data.board,
-          status: engineResponse.data.status,
-          is_player_turn: true,
-          move_history: engineResponse.data.engine_move
-            ? [...prev.move_history, engineResponse.data.engine_move]
-            : prev.move_history,
-        } : null;
-        return newState;
-      });
-    } else {
-      throw new Error('Engine move failed');
+      throw new Error(response.data.error_message || 'Invalid move');
     }
   } catch (err) {
     console.error('Move error:', err);
     setError('Move failed. Please try again.');
     // Revert to previous state if possible
-    setGameStateWithLog(prev => prevState);
+    setGameStateWithLog(prevState);
     throw err;
   } finally {
     setLoading(false);
@@ -247,7 +259,9 @@ const refreshGameState = useCallback(async () => {
   try {
     setLoading(true);
     setError(null);
-    const response = await axios.get<GameState>(`${API_BASE_URL}/game/${gameState.game_id}`);
+    const response = await axios.get<GameState>(
+      `${API_BASE_URL}/games/${gameState.game_id}`
+    );
     setGameStateWithLog(response.data);
   } catch (err) {
     setError('Failed to refresh game state');

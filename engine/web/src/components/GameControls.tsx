@@ -29,7 +29,7 @@ export const GameControls: React.FC = () => {
   const gameResultMessage = currentGame ? getGameResultMessage(currentGame.status) : null;
 
   const handleNewGame = () => {
-    startNewGame();
+    startNewGame('single');
   };
 
   return (

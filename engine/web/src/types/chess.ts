@@ -4,6 +4,17 @@ export interface GameState {
   status: GameStatus;
   move_history: string[];
   is_player_turn: boolean;
+  metadata?: {
+    game_id: string;
+    mode: 'single' | 'community';
+    created_at: string;
+    last_move_at: string;
+    status: string;
+    total_moves: number;
+    player_color: string;
+    player_name: string | null;
+    engine_version: string;
+  };
 }
 
 export type GameStatus = 

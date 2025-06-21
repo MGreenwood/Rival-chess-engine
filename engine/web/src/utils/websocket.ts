@@ -1,7 +1,20 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { useStore } from '../store/store';
+import useStore from '../store/store';
+import type { ConnectionStatus, AnalysisResult, TrainingMetrics } from '../store/types';
 
-const WS_BASE_URL = 'ws://localhost:3000/ws';
+// Dynamic WebSocket URL based on current host
+const getWebSocketURL = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  
+  // If accessing via localhost, use localhost:3000 with appropriate WebSocket protocol
+  if (host.includes('localhost') || host.includes('127.0.0.1')) {
+    return `${protocol}//localhost:3000/ws`;
+  }
+  
+  // Otherwise use the current host with /ws path (tunnel)
+  return `${protocol}//${host}/ws`;
+};
 
 export function useWebSocket(gameId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -21,13 +34,13 @@ export function useWebSocket(gameId: string | null) {
       wsRef.current.close(1000, 'Switching to new game');
     }
 
-    const wsUrl = `${WS_BASE_URL}/${gameId}`;
+    const wsUrl = `${getWebSocketURL()}/${gameId}`;
     console.log('Connecting to WebSocket URL:', wsUrl);
     const socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
       console.log('WebSocket connected for game:', gameId);
-      useStore.setState({ connectionStatus: 'connected' });
+      useStore.setState({ connectionStatus: 'connected' as ConnectionStatus });
       // Request initial game state
       socket.send(JSON.stringify({ command: 'refresh' }));
     };
@@ -38,10 +51,10 @@ export function useWebSocket(gameId: string | null) {
         console.log('WebSocket message received:', message);
 
         if (message.type === 'status' && message.payload.board) {
-          useStore.setState(state => {
+          useStore.setState((state) => {
             if (!state.currentGame || state.currentGame.game_id !== gameId) {
               console.log('Ignoring state update for different game');
-              return state;
+              return {};
             }
 
             const isGameOver = message.payload.status === 'checkmate' ||
@@ -49,7 +62,6 @@ export function useWebSocket(gameId: string | null) {
                              message.payload.status === 'draw';
 
             return {
-              ...state,
               currentGame: {
                 ...state.currentGame,
                 board: message.payload.board,
@@ -59,13 +71,9 @@ export function useWebSocket(gameId: string | null) {
             };
           });
         } else if (message.type === 'analysis') {
-          useStore.setState({
-            currentAnalysis: message.payload
-          });
+          useStore.setState({ currentAnalysis: message.payload as AnalysisResult });
         } else if (message.type === 'training') {
-          useStore.setState({
-            trainingMetrics: message.payload
-          });
+          useStore.setState({ trainingMetrics: message.payload as TrainingMetrics });
         }
       } catch (err) {
         console.error('Error parsing WebSocket message:', err);
@@ -74,12 +82,12 @@ export function useWebSocket(gameId: string | null) {
 
     socket.onerror = (error) => {
       console.error('WebSocket error:', error);
-      useStore.setState({ connectionStatus: 'disconnected' });
+      useStore.setState({ connectionStatus: 'disconnected' as ConnectionStatus });
     };
 
     socket.onclose = (event) => {
       console.log('WebSocket closed:', event.code, event.reason);
-      useStore.setState({ connectionStatus: 'disconnected' });
+      useStore.setState({ connectionStatus: 'disconnected' as ConnectionStatus });
 
       // Clear any existing reconnect timeout
       if (reconnectTimeoutRef.current) {
@@ -94,7 +102,7 @@ export function useWebSocket(gameId: string | null) {
       if (event.code === 1006 &&
           currentGame?.game_id === gameId &&
           currentGame?.status === 'active') {
-        useStore.setState({ connectionStatus: 'connecting' });
+        useStore.setState({ connectionStatus: 'connecting' as ConnectionStatus });
         reconnectTimeoutRef.current = window.setTimeout(() => {
           console.log('Attempting to reconnect...');
           connect();

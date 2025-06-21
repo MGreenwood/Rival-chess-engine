@@ -74,7 +74,7 @@ def parse_args():
                       help='Save model every N epochs')
     
     # Training settings
-    parser.add_argument('--batch-size', type=int, default=64,
+    parser.add_argument('--batch-size', type=int, default=32,
                       help='Batch size for training')
     parser.add_argument('--learning-rate', type=float, default=0.001,
                       help='Learning rate')
@@ -106,7 +106,7 @@ def parse_args():
     # Hardware settings
     parser.add_argument('--device', type=str, default='cuda',
                       help='Device to use (cuda/cpu)')
-    parser.add_argument('--num-workers', type=int, default=4,
+    parser.add_argument('--num-workers', type=int, default=2,
                       help='Number of data loading workers')
     
     # Logging settings

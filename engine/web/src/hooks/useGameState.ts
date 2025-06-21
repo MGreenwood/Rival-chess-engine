@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useStore } from '../store/store';
+import useStore from '../store/store';
 import type { GameState } from '../types/chess';
 
 interface GameStateHook {
