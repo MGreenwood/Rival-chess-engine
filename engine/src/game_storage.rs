@@ -84,15 +84,44 @@ pub struct CommunityGameState {
     pub voting_ends_at: Option<DateTime<Utc>>,
 }
 
+// Persistent model statistics that survive game archival
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ModelStats {
+    pub total_games: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub draws: usize,
+    pub games_by_engine_version: HashMap<String, EngineVersionStats>,
+    pub last_updated: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct EngineVersionStats {
+    pub total_games: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub draws: usize,
+    pub first_game: DateTime<Utc>,
+    pub last_game: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PersistentStats {
+    pub single_player: ModelStats,
+    pub community: ModelStats,
+}
+
 pub struct GameStorage {
     base_path: PathBuf,
+    stats_path: PathBuf,
 }
 
 impl GameStorage {
     pub fn new<P: AsRef<Path>>(base_path: P) -> std::io::Result<Self> {
         let base_path = base_path.as_ref().to_path_buf();
         fs::create_dir_all(&base_path)?;
-        Ok(Self { base_path })
+        let stats_path = base_path.join("model_stats.json");
+        Ok(Self { base_path, stats_path })
     }
 
     fn get_game_path(&self, game_id: &str, mode: &GameMode) -> PathBuf {
@@ -107,14 +136,125 @@ impl GameStorage {
         let path = self.get_game_path(&state.metadata.game_id, &state.metadata.mode);
         fs::create_dir_all(path.parent().unwrap())?;
         let json = serde_json::to_string_pretty(state)?;
-        fs::write(path, json)
+        fs::write(path, json)?;
+        
+        // Update persistent stats when saving completed games
+        if matches!(state.metadata.status, 
+            GameStatus::WhiteWins | GameStatus::BlackWins | 
+            GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+            GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves) {
+            self.update_persistent_stats(&state.metadata)?;
+        }
+        
+        Ok(())
     }
 
     pub fn save_community_game(&self, state: &CommunityGameState) -> std::io::Result<()> {
         let path = self.get_game_path(&state.metadata.game_id, &state.metadata.mode);
         fs::create_dir_all(path.parent().unwrap())?;
         let json = serde_json::to_string_pretty(state)?;
-        fs::write(path, json)
+        fs::write(path, json)?;
+        
+        // Update persistent stats when saving completed games
+        if matches!(state.metadata.status, 
+            GameStatus::WhiteWins | GameStatus::BlackWins | 
+            GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+            GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves) {
+            self.update_persistent_stats(&state.metadata)?;
+        }
+        
+        Ok(())
+    }
+
+    fn update_persistent_stats(&self, metadata: &GameMetadata) -> std::io::Result<()> {
+        let mut stats = self.load_persistent_stats()?;
+        
+        let model_stats = match metadata.mode {
+            GameMode::SinglePlayer => &mut stats.single_player,
+            GameMode::Community => &mut stats.community,
+        };
+        
+        // Update overall stats
+        model_stats.total_games += 1;
+        match metadata.status {
+            GameStatus::WhiteWins => {
+                if metadata.player_color == "white" {
+                    model_stats.wins += 1;
+                } else {
+                    model_stats.losses += 1;
+                }
+            },
+            GameStatus::BlackWins => {
+                if metadata.player_color == "black" {
+                    model_stats.wins += 1;
+                } else {
+                    model_stats.losses += 1;
+                }
+            },
+            _ => model_stats.draws += 1,
+        }
+        
+        // Update engine version specific stats
+        let engine_stats = model_stats.games_by_engine_version
+            .entry(metadata.engine_version.clone())
+            .or_insert_with(|| EngineVersionStats {
+                first_game: metadata.created_at,
+                last_game: metadata.created_at,
+                ..Default::default()
+            });
+            
+        engine_stats.total_games += 1;
+        engine_stats.last_game = metadata.last_move_at;
+        
+        match metadata.status {
+            GameStatus::WhiteWins => {
+                if metadata.player_color == "white" {
+                    engine_stats.wins += 1;
+                } else {
+                    engine_stats.losses += 1;
+                }
+            },
+            GameStatus::BlackWins => {
+                if metadata.player_color == "black" {
+                    engine_stats.wins += 1;
+                } else {
+                    engine_stats.losses += 1;
+                }
+            },
+            _ => engine_stats.draws += 1,
+        }
+        
+        model_stats.last_updated = Utc::now();
+        
+        // Save updated stats
+        self.save_persistent_stats(&stats)
+    }
+
+    pub fn load_persistent_stats(&self) -> std::io::Result<PersistentStats> {
+        if self.stats_path.exists() {
+            let json = fs::read_to_string(&self.stats_path)?;
+            Ok(serde_json::from_str(&json).unwrap_or_default())
+        } else {
+            Ok(PersistentStats::default())
+        }
+    }
+
+    pub fn save_persistent_stats(&self, stats: &PersistentStats) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(stats)?;
+        fs::write(&self.stats_path, json)
+    }
+
+    pub fn archive_games_metadata(&self, games: &[GameMetadata]) -> std::io::Result<()> {
+        // Ensure all game metadata is recorded in persistent stats before archival
+        for metadata in games {
+            if matches!(metadata.status, 
+                GameStatus::WhiteWins | GameStatus::BlackWins | 
+                GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+                GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves) {
+                self.update_persistent_stats(metadata)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn load_game(&self, game_id: &str, mode: &GameMode) -> std::io::Result<GameState> {

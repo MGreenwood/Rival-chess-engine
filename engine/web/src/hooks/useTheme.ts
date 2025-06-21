@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useStore } from '../store/store';
+import useStore from '../store/store';
 import type { Theme, UserPreferences } from '../store/types';
 
 interface ThemeHook {
@@ -13,7 +13,8 @@ interface ThemeHook {
 }
 
 export function useTheme(): ThemeHook {
-  const { theme, preferences, uiActions } = useStore();
+  const store = useStore();
+  const { theme, preferences, uiActions } = store;
 
   const toggleTheme = useCallback(() => {
     const newMode = theme.mode === 'dark' ? 'light' : 'dark';

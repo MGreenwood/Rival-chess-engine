@@ -9,7 +9,7 @@ import torch
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import defaultdict, deque
 from tqdm import tqdm
 from pathlib import Path
 import chess
@@ -118,11 +118,38 @@ class SelfPlayGenerator:
         # Create save directory if it doesn't exist
         os.makedirs(config.save_dir, exist_ok=True)
         
-        # Initialize metrics
-        self.metrics = defaultdict(list)
+        # Initialize metrics with limited history
+        self.metrics = defaultdict(lambda: deque(maxlen=1000))  # Limit metric history
         self.timing_metrics = defaultdict(float)
-        self.position_counts = defaultdict(int)  # Track position occurrences
-        self.last_positions = defaultdict(list)  # Track recent positions for each game
+        self.position_counts = defaultdict(int)
+        self.last_positions = defaultdict(lambda: deque(maxlen=15))  # Limit position history
+        
+        # Add memory cleanup interval
+        self.games_since_cleanup = 0
+        self.cleanup_interval = 50  # Clean up every 50 games
+    
+    def _cleanup_memory(self):
+        """Clean up memory periodically."""
+        if self.games_since_cleanup >= self.cleanup_interval:
+            # Clear MCTS search tree
+            self.mcts.clear_tree()
+            
+            # Clear metrics older than 1000 games
+            self.metrics.clear()
+            self.timing_metrics.clear()
+            self.position_counts.clear()
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache if using GPU
+            if self.config.device == "cuda":
+                torch.cuda.empty_cache()
+            
+            self.games_since_cleanup = 0
+        else:
+            self.games_since_cleanup += 1
     
     def _get_position_key(self, board: chess.Board) -> str:
         """Get a unique key for the current position."""
@@ -207,151 +234,45 @@ class SelfPlayGenerator:
         value += bonus
         return value
 
-    def generate_games(self, epoch: Optional[int] = None) -> List[GameRecord]:
+    def generate_games(self, num_games: Optional[int] = None, epoch: Optional[int] = None, save_games: bool = True) -> List[GameRecord]:
         """Generate self-play games.
         
         Args:
-            epoch: Current training epoch (for logging)
+            num_games: Number of games to generate (defaults to config.num_games)
+            epoch: Current training epoch
+            save_games: Whether to save games to disk
             
         Returns:
-            List[GameRecord]: List of game records
+            List of game records
         """
-        logger.info("Starting self-play game generation...")
-        logger.info(f"Configuration: {self.config}")
+        num_games = num_games or self.config.num_games
+        games = []
         
-        # Initialize games
-        games = [GameRecord() for _ in range(self.config.num_games)]
-        boards = [chess.Board() for _ in range(self.config.num_games)]
-        active_games = list(range(self.config.num_games))
-        move_count = 0
-        completed_games = 0
+        # Use tqdm if configured
+        game_iter = tqdm(range(num_games)) if self.config.use_tqdm else range(num_games)
         
-        with tqdm(total=self.config.num_games, desc="Generating self-play games", 
-                 disable=not self.config.use_tqdm) as pbar:
-            
-            while active_games and move_count < self.config.max_moves:
-                # Record states for active games
-                for game_idx in active_games:
-                    games[game_idx].add_state(boards[game_idx])
+        for i in game_iter:
+            try:
+                # Generate game
+                game = self.play_game()
+                games.append(game)
                 
-                # Get policies and values for all active games
-                policies = []
-                values = []
-                for game_idx in active_games:
-                    policy, value = self.mcts.get_action_policy(boards[game_idx])
-                    policies.append(policy)
-                    values.append(value)
+                # Save games in batches to reduce memory usage
+                if save_games and len(games) >= 10:
+                    self._save_games(games, epoch)
+                    games = []  # Clear saved games from memory
                 
-                # Process each active game
-                still_active = []
-                for i, game_idx in enumerate(active_games):
-                    board = boards[game_idx]
-                    policy = policies[i]
-                    value = values[i]
-                    
-                    # Get legal moves and create mask
-                    legal_moves = list(board.legal_moves)
-                    legal_mask = np.zeros(5312, dtype=np.float32)
-                    for move in legal_moves:
-                        move_idx = self.mcts._move_to_move_idx(move)
-                        if move_idx is not None and 0 <= move_idx < 5312:
-                            legal_mask[move_idx] = 1.0
-                    
-                    # Apply mask to policy
-                    masked_policy = policy * legal_mask
-                    
-                    # Get probabilities for legal moves
-                    move_probs = {}
-                    for move in legal_moves:
-                        prob = masked_policy.get(move, 1e-8)
-                        move_probs[move] = float(prob)
-                    
-                    # Add small epsilon to prevent zero probabilities
-                    min_prob = 1e-8
-                    for move in move_probs:
-                        move_probs[move] = max(move_probs[move], min_prob)
-                    
-                    # Apply temperature if needed
-                    if self.config.temperature > 0:
-                        moves = list(move_probs.keys())
-                        probs = torch.tensor([move_probs[move] for move in moves], device=self.config.device)
-                        probs = probs ** (1.0 / self.config.temperature)
-                        probs = probs / (probs.sum() + 1e-8)
-                        move_probs = {move: float(prob) for move, prob in zip(moves, probs)}
-                    
-                    # Sample move
-                    if self.config.temperature > 0:
-                        moves = list(move_probs.keys())
-                        probs = np.array([move_probs[move] for move in moves])
-                        probs = np.array(probs, dtype=np.float64)
-                        probs = np.clip(probs, 0, None)
-                        total = probs.sum()
-                        if total == 0 or not np.isfinite(total):
-                            probs = np.ones_like(probs) / len(probs)
-                        else:
-                            probs = probs / total
-                        move_idx = np.random.choice(len(moves), p=probs)
-                        move = moves[move_idx]
-                    else:
-                        move = max(move_probs.items(), key=lambda x: x[1])[0]
-                    
-                    # Record move and policy
-                    games[game_idx].add_move(move)
-                    
-                    # Convert policy to array format for storage
-                    policy_array = np.zeros(5312, dtype=np.float32)
-                    for m, prob in move_probs.items():
-                        move_idx = self.mcts._move_to_move_idx(m)
-                        if move_idx is not None and 0 <= move_idx < 5312:
-                            policy_array[move_idx] = float(prob)
-                    games[game_idx].add_policy(policy_array)
-                    games[game_idx].add_value(value)
-                    
-                    # Make move
-                    board.push(move)
-                    
-                    # Check if game is over
-                    if board.is_game_over():
-                        # Set game result
-                        if board.is_checkmate():
-                            games[game_idx].set_result(GameResult.WHITE_WINS if board.turn == chess.BLACK else GameResult.BLACK_WINS)
-                        elif board.is_stalemate() or board.is_insufficient_material():
-                            games[game_idx].set_result(GameResult.DRAW)
-                        elif board.can_claim_threefold_repetition():
-                            # Check if we're in endgame (few pieces left)
-                            num_pieces = len(board.piece_map())
-                            if num_pieces <= 6:  # Endgame with 6 or fewer pieces
-                                games[game_idx].set_result(GameResult.DRAW)  # Neutral reward in endgame
-                            else:
-                                games[game_idx].set_result(GameResult.REPETITION_DRAW)  # Penalty in opening/middlegame
-                        else:
-                            games[game_idx].set_result(GameResult.DRAW)
-                        completed_games += 1
-                        pbar.update(1)
-                        # Log game completion with result
-                        logger.info(f"Game {game_idx + 1} completed: {games[game_idx].result.name} after {len(games[game_idx].moves)} moves")
-                    else:
-                        still_active.append(game_idx)
+                # Cleanup memory periodically
+                self._cleanup_memory()
                 
-                active_games = still_active
-                move_count += 1
-            
-            # Handle any remaining active games (they hit the move limit)
-            for game_idx in active_games:
-                games[game_idx].set_result(GameResult.DRAW)  # Draw by move limit
-                completed_games += 1
-                pbar.update(1)
-                logger.info(f"Game {game_idx + 1} completed: Draw by move limit after {len(games[game_idx].moves)} moves")
-            
-            # Update game counter for next epoch
-            self.game_counter += completed_games
-            
-            # Log completion status
-            logger.info(f"Completed {completed_games} games in epoch {epoch + 1 if epoch is not None else 'unknown'}")
-            logger.info(f"Total games played so far: {self.game_counter}")
+            except Exception as e:
+                logger.error(f"Error generating game {i}: {e}")
+                logger.error(traceback.format_exc())
+                continue
         
-        # Save games
-        self._save_games(games, epoch or 0)
+        # Save any remaining games
+        if save_games and games:
+            self._save_games(games, epoch)
         
         return games
     

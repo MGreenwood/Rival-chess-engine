@@ -17,7 +17,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose })
     getThemeColor
   } = useTheme();
 
-  const { uiActions, gameActions } = useStore();
+  const { gameActions } = useStore();
   const { startNewGame } = gameActions;
 
   const [temperature, setTemperature] = React.useState(1.0);
@@ -25,10 +25,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose })
 
   const handleStartNewGame = async () => {
     try {
-      await startNewGame({
-        temperature: Number(temperature),
-        strength: Number(strength),
-      });
+      await startNewGame('single');
     } catch (error) {
       console.error('Failed to start new game:', error);
     }

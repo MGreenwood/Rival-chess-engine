@@ -1,0 +1,44 @@
+tunnel: 720b1900-790b-4980-9694-8cad38c2a127
+credentials-file: C:\Users\craft\.cloudflared\720b1900-790b-4980-9694-8cad38c2a127.json
+
+# Ingress rules - order matters!
+ingress:
+  # WebSocket connections - needs to be first for proper upgrade handling
+  - hostname: rivalchess.xyz
+    path: /ws/*
+    service: http://localhost:3000
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+      tlsTimeout: 30s
+      keepAliveTimeout: 30s
+      keepAliveConnections: 1024
+  
+  # Backend API routes - specific endpoints
+  - hostname: rivalchess.xyz
+    path: /move/*
+    service: http://localhost:3000
+  
+  - hostname: rivalchess.xyz
+    path: /move
+    service: http://localhost:3000
+  
+  - hostname: rivalchess.xyz
+    path: /games*
+    service: http://localhost:3000
+  
+  - hostname: rivalchess.xyz
+    path: /stats
+    service: http://localhost:3000
+  
+  # Generic API routes - backend server
+  - hostname: rivalchess.xyz
+    path: /api/*
+    service: http://localhost:3000
+  
+  # Everything else - frontend React app
+  - hostname: rivalchess.xyz
+    service: http://localhost:5173
+  
+  # Catch-all rule (required)
+  - service: http_status:404 

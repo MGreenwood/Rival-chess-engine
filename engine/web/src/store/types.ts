@@ -40,7 +40,7 @@ export interface Theme {
 }
 
 export interface UserPreferences {
-  animationSpeed: 'fast' | 'normal' | 'slow';
+  animationSpeed: number;
   showCoordinates: boolean;
   pieceStyle: string;
   boardTheme: string;
@@ -90,6 +90,8 @@ export interface ModelStats {
   wins: number;
   losses: number;
   draws: number;
+  total_games: number;
+  win_rate?: number;
 }
 
 export interface LeaderboardEntry {
@@ -123,13 +125,13 @@ export interface GameMetadata {
 }
 
 export interface GameState {
+  game_id: string;
   metadata: GameMetadata;
   board: string;
   move_history: string[];
   analysis?: Record<string, number>;
   is_player_turn: boolean;
   status: GameStatus;
-  game_id?: string;  // For backward compatibility with server responses
 }
 
 export interface StoreState {
@@ -140,6 +142,11 @@ export interface StoreState {
   preferences: UserPreferences;
   modelStats: ModelStats | null;
   leaderboard: LeaderboardEntry[];
+  connectionStatus?: ConnectionStatus;
+  currentAnalysis?: AnalysisResult;
+  analysisHistory?: AnalysisResult[];
+  analysisActions?: AnalysisActions;
+  trainingMetrics?: TrainingMetrics;
   gameActions: {
     makeMove: (move: string) => Promise<void>;
     startNewGame: (mode?: GameMode) => Promise<void>;

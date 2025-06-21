@@ -1,14 +1,18 @@
 use chess::{Board, ChessMove, MoveGen};
 use crate::bridge::python::ModelBridge;
+use crate::mcts::{MCTS, MCTSConfig};
 use rand::{thread_rng, Rng};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 const MAX_POLICY_SIZE: usize = 5312;  // 4096 regular moves + 1216 promotion moves
 
+#[derive(Clone)]
 pub struct Engine {
     board: Board,
     model: ModelBridge,
     temperature: f32,
     strength: f32,
+    mcts: Option<Arc<Mutex<MCTS>>>,
 }
 
 impl Engine {
@@ -16,8 +20,26 @@ impl Engine {
         Self {
             board: Board::default(),
             model,
-            temperature: 1.0,  // Default temperature
+            temperature: 0.8,  // Slightly lower temperature for more focused play
             strength: 1.0,     // Default strength (full strength)
+            mcts: None,
+        }
+    }
+
+    pub fn new_with_mcts(model: ModelBridge) -> Self {
+        let mcts_config = MCTSConfig {
+            num_simulations: 500,   // Reduced for faster community games  
+            temperature: 0.1,       // Low temperature for strong play
+            c_puct: 1.25,           // Slightly more exploitative
+            ..MCTSConfig::default()
+        };
+        
+        Self {
+            board: Board::default(),
+            model: model.clone(),
+            temperature: 0.1,       // Low temperature for deterministic strong play
+            strength: 1.0,
+            mcts: Some(Arc::new(Mutex::new(MCTS::new(model, mcts_config)))),
         }
     }
 
@@ -56,6 +78,33 @@ impl Engine {
     }
 
     pub fn get_best_move(&self, board: Board) -> Option<ChessMove> {
+        // Use MCTS if available (for community engine)
+        if let Some(mcts_arc) = &self.mcts {
+            let mcts_result: Result<MutexGuard<'_, MCTS>, PoisonError<MutexGuard<'_, MCTS>>> = match mcts_arc.lock() {
+                Ok(mcts) => Ok(mcts),
+                Err(poisoned) => {
+                    eprintln!("⚠️ MCTS mutex was poisoned, recovering...");
+                    Ok(poisoned.into_inner())
+                }
+            };
+
+            if let Ok(mut mcts) = mcts_result {
+                // Use time-based MCTS for community games (max 10 seconds to prevent blocking training)
+                let timeout = std::time::Duration::from_secs(10);
+                match mcts.get_best_move_with_time(&board, timeout) {
+                    Ok(mv) => {
+                        eprintln!("🧠 MCTS selected move: {} (max 10s timeout)", mv);
+                        return Some(mv);
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ MCTS failed, falling back to direct policy: {}", e);
+                        // Fall through to direct policy evaluation
+                    }
+                }
+            }
+        }
+
+        // Direct policy evaluation (for single player engine or fallback)
         match self.model.predict_with_board(board.to_string()) {
             Ok((policy, _)) => {
                 // Validate policy size
@@ -81,7 +130,7 @@ impl Engine {
                     return None;
                 }
 
-                // Apply temperature scaling
+                // Apply temperature scaling with better focus
                 let scaled_probs = Self::softmax(&probs, self.temperature);
 
                 // Apply strength scaling
@@ -89,6 +138,18 @@ impl Engine {
                 if rng.gen::<f32>() > self.strength {
                     // Make a random move with probability (1 - strength)
                     return self.get_random_move(&board);
+                }
+
+                // Use more deterministic selection for stronger play
+                if self.temperature < 0.1 {
+                    // Deterministic: pick the best move
+                    let best_idx = scaled_probs
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    return Some(moves[best_idx]);
                 }
 
                 // Sample move based on probabilities

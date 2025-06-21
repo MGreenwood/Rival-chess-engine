@@ -4,6 +4,7 @@ use pyo3::exceptions::PyValueError;
 use chess::ChessMove;
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ModelBridge {
     model: PyObject,
     device: Option<String>,
