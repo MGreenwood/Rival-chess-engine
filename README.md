@@ -1,6 +1,6 @@
 # RivalAI Chess Engine
 
-A novel chess engine implementing the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions. CHESS transforms chess positions into rich graph structures, known as Positional Adjacency Graphs (PAG), that capture piece relationships, strategic importance, and positional dynamics.
+A novel chess engine coining the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions. CHESS transforms chess positions into rich graph structures, known as Positional Adjacency Graphs (PAG), that capture piece relationships, strategic importance, and positional dynamics.
 
 ## Project Structure
 
@@ -348,45 +348,4 @@ Then open your browser to `http://localhost:6006` to view:
 
 See [DESIGN.md](DESIGN.md) for detailed architecture documentation and [MILESTONES.md](MILESTONES.md) for development roadmap.
 
-## License
 
-MIT License - See LICENSE file for details
-
-## Web Interface
-
-The web interface provides a rich user experience with:
-
-### Common Features
-- Interactive chessboard
-- Move validation
-- Game controls
-- Theme customization
-- Model statistics
-- Move history
-
-### Single Player Features
-- Direct gameplay against AI
-- Move analysis
-- Game state tracking
-- Position evaluation
-
-### Community Mode Features
-- Real-time vote display
-- Countdown timer
-- Vote statistics
-- Move suggestions
-- Vote modification
-- Game state synchronization
-
-## API Endpoints
-
-### Game Management
-- `POST /api/move/{game_id}` - Make a move in single player mode
-- `GET /api/games` - List all saved games
-- `GET /api/games/{mode}/{game_id}` - Load a specific game
-- `DELETE /api/games/{mode}/{game_id}` - Delete a game
-
-### Community Mode
-- `POST /api/community/start` - Start a new community game
-- `POST /api/community/vote` - Submit or update a vote
-- `GET /api/community/state` - Get current game state 
