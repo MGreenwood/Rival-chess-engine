@@ -43,6 +43,7 @@ ENV/
 *.weights
 *.npy
 *.npz
+*.zip
 
 # Training data and logs
 experiments/
