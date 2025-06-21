@@ -226,6 +226,12 @@ python python/scripts/train.py \
     --tensorboard \                 # Enable TensorBoard logging
     --log-level INFO                # Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 ```
+# MOST USED COMMANDS
+## tunnel command
+cloudflared tunnel --config $env:TUNNEL_CONFIG run $env:TUNNEL_ID
+## engine+backend
+ cargo run --bin server -- --tensorboard --community-model-path "../python/experiments/rival_ai_v1_Alice/run_20250619_162208/checkpoints/best_model.pt"
+
 
 ### Training Output
 

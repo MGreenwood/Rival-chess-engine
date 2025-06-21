@@ -108,37 +108,59 @@ const useStore = create<StoreState>((set, get) => {
 
     gameActions: {
       makeMove: async (move: string) => {
-        const { currentGame } = get();
+        const state = get();
+        const { currentGame } = state;
         if (!currentGame) {
           throw new Error('No active game');
         }
 
+        // Prevent multiple simultaneous moves
+        if (state.loading) {
+          throw new Error('Move already in progress');
+        }
+
+        // Set loading state to prevent race conditions
+        set({ loading: true });
+
         try {
+          // Get fresh state right before making the request
+          const freshState = get();
+          const freshGame = freshState.currentGame;
+          if (!freshGame) {
+            throw new Error('No active game');
+          }
+
+          console.log('Making move:', move, 'Current board:', freshGame.board);
+
           const response = await axios.post(`${API_BASE_URL}/move`, {
             move_str: move,
             player_color: 'white',
-            game_id: currentGame.metadata?.game_id || currentGame.game_id
+            game_id: freshGame.metadata?.game_id || freshGame.game_id,
+            board: freshGame.board
           });
 
           if (response.data.success) {
+            console.log('Move successful, updating state. New board:', response.data.board);
             const newGameState: GameState = {
-              ...currentGame,
+              ...freshGame,
               board: response.data.board,
               status: response.data.status,
               move_history: response.data.move_history,
               is_player_turn: response.data.is_player_turn,
               metadata: {
-                ...currentGame.metadata!,
+                ...freshGame.metadata!,
                 status: response.data.status,
                 total_moves: response.data.move_history?.length || 0,
                 last_move_at: new Date().toISOString()
               }
             };
-            set({ currentGame: newGameState });
+            set({ currentGame: newGameState, loading: false });
           } else if (response.data.error_message) {
+            set({ loading: false });
             throw new Error(response.data.error_message);
           }
         } catch (error: any) {
+          set({ loading: false });
           // Keep the error throwing but don't log to console
           const errorMessage = error.response?.data?.error_message || error.message || 'Failed to make move';
           throw new Error(errorMessage);

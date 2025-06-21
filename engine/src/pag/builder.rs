@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use super::{
     PAG,
-    node::{Node, NodeType, PieceNode, CriticalSquareNode, PieceType, Color, CriticalSquareType},
-    edge::{Edge, EdgeType, DirectRelationType, ControlType, CooperationType},
+    node::{Node, NodeType, PieceNode, CriticalSquareNode, PieceType, Color},
+    edge::{Edge, LegacyEdgeType, DirectRelationType, ControlType, CooperationType},
     Coordinate,
 };
 
@@ -56,12 +56,10 @@ impl PAGBuilder {
     fn create_critical_square_node(
         &mut self,
         coordinate: Coordinate,
-        square_type: CriticalSquareType,
     ) -> CriticalSquareNode {
         CriticalSquareNode::new(
             self.get_next_id(),
             coordinate,
-            square_type,
         )
     }
 
@@ -103,13 +101,7 @@ impl PAGBuilder {
         // Second pass: create critical square nodes for important squares
         for (coord, importance) in square_importance {
             if importance >= 0.5 {  // Threshold for considering a square critical
-                let square_type = if importance >= 1.0 {
-                    CriticalSquareType::KingVicinity
-                } else {
-                    CriticalSquareType::CentralSquare
-                };
-
-                critical_squares.push(self.create_critical_square_node(coord, square_type));
+                critical_squares.push(self.create_critical_square_node(coord));
             }
         }
 
@@ -129,8 +121,8 @@ impl PAGBuilder {
                 if piece1.color() != piece2.color() {
                     // Check if piece1 attacks piece2
                     if self.can_attack(piece1, piece2) {
-                        edges.push(Edge::new(
-                            EdgeType::DirectRelation(DirectRelationType::Attack {
+                        edges.push(Edge::new_legacy(
+                            LegacyEdgeType::DirectRelation(DirectRelationType::Attack {
                                 attacker_type: piece1.piece_type(),
                                 target_type: piece2.piece_type(),
                                 strength: 1.0,  // To be refined based on piece values and position
@@ -143,8 +135,8 @@ impl PAGBuilder {
 
                     // Check if piece2 attacks piece1
                     if self.can_attack(piece2, piece1) {
-                        edges.push(Edge::new(
-                            EdgeType::DirectRelation(DirectRelationType::Attack {
+                        edges.push(Edge::new_legacy(
+                            LegacyEdgeType::DirectRelation(DirectRelationType::Attack {
                                 attacker_type: piece2.piece_type(),
                                 target_type: piece1.piece_type(),
                                 strength: 1.0,
@@ -157,8 +149,8 @@ impl PAGBuilder {
                 } else {
                     // Same color pieces: check for cooperative relationships
                     if let Some(coop_type) = self.identify_cooperation(piece1, piece2) {
-                        edges.push(Edge::new(
-                            EdgeType::Cooperation(coop_type),
+                        edges.push(Edge::new_legacy(
+                            LegacyEdgeType::Cooperation(coop_type),
                             1.0,
                             piece1.get_id(),
                             piece2.get_id(),
@@ -197,7 +189,10 @@ impl PAGBuilder {
         
         // Bishop pair
         if piece1.piece_type() == PieceType::Bishop && piece2.piece_type() == PieceType::Bishop {
-            return Some(CooperationType::BishopPair);
+            return Some(CooperationType {
+                cooperation_strength: 1.0,
+                cooperation_type: "BishopPair".to_string(),
+            });
         }
 
         // Battery formation (rook/queen alignment)
@@ -205,13 +200,19 @@ impl PAGBuilder {
            (piece2.piece_type() == PieceType::Rook || piece2.piece_type() == PieceType::Queen) {
             if piece1.get_coordinate().rank == piece2.get_coordinate().rank ||
                piece1.get_coordinate().file == piece2.get_coordinate().file {
-                return Some(CooperationType::Battery { strength: 1.0 });
+                return Some(CooperationType {
+                    cooperation_strength: 1.0,
+                    cooperation_type: "Battery".to_string(),
+                });
             }
         }
 
         // Mutual defense
         if self.can_attack(piece1, piece2) {
-            return Some(CooperationType::MutualDefense { strength: 1.0 });
+            return Some(CooperationType {
+                cooperation_strength: 1.0,
+                cooperation_type: "MutualDefense".to_string(),
+            });
         }
 
         None
@@ -228,8 +229,8 @@ impl PAGBuilder {
         for piece in pieces {
             for square in critical_squares {
                 if self.controls_square(piece, square.get_coordinate()) {
-                    edges.push(Edge::new(
-                        EdgeType::Control(ControlType {
+                    edges.push(Edge::new_legacy(
+                        LegacyEdgeType::Control(ControlType {
                             controlling_color: piece.color(),
                             degree: 1.0,  // To be refined based on piece type and distance
                             is_contested: false,  // To be determined by analyzing all pieces
@@ -271,25 +272,25 @@ impl PAGBuilder {
 
         // Add all piece nodes
         for piece in &pieces {
-            pag.add_node(NodeType::Piece(piece.clone()));
+            pag.add_node(NodeType::LegacyPiece(piece.clone()));
         }
 
         // Identify and add critical squares
         let critical_squares = self.identify_critical_squares(&pieces);
         for square in &critical_squares {
-            pag.add_node(NodeType::CriticalSquare(square.clone()));
+            pag.add_node(NodeType::LegacyCriticalSquare(square.clone()));
         }
 
         // Create and add piece relationship edges
         let piece_edges = self.create_piece_relationship_edges(&pieces);
         for edge in piece_edges {
-            pag.add_edge(edge);
+            let _ = pag.add_edge(edge);
         }
 
         // Create and add control edges
         let control_edges = self.create_control_edges(&pieces, &critical_squares);
         for edge in control_edges {
-            pag.add_edge(edge);
+            let _ = pag.add_edge(edge);
         }
 
         pag

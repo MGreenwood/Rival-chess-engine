@@ -221,7 +221,7 @@ const makeMove = useCallback(async (move: string) => {
         move_str: move,
         game_id: gameState.game_id,
         board: gameState.board,
-        player_color: 'white'  // Add this if needed
+        player_color: 'white'
       } as MoveRequest
     );
     console.log('Move response:', response.data);
@@ -234,7 +234,7 @@ const makeMove = useCallback(async (move: string) => {
           board: response.data.board,
           status: response.data.status as GameStatus,
           is_player_turn: response.data.is_player_turn,
-          // Keep existing move_history since MoveResponse doesn't include it
+          move_history: response.data.move_history || prev.move_history,
         } : null;
         return newState;
       });

@@ -13,17 +13,17 @@ python = ["pyo3/extension-module"]
 
 [dependencies]
 # Core dependencies
-petgraph = "0.6.3"  # For graph data structures
-rand = "0.8.5"      # For MCTS
+petgraph = { version = "0.6", features = ["serde-1"] }
+rand = "0.8"
 rand_distr = "0.4.3"  # For Dirichlet noise
-rayon = "1.8.0"     # For parallel processing
+rayon = "1.7"     # For parallel processing
 serde = { version = "1.0", features = ["derive"] }  # For serialization
 serde_json = "1.0"  # For JSON serialization
-chess = "3.2.0"     # Chess rules and move generation
+chess = "3.2"     # Chess rules and move generation
 clap = { version = "4.4", features = ["derive"] }  # CLI arguments
 anyhow = "1.0"   # Error handling
 thiserror = "1.0.57"  # Error definitions
-log = "0.4.21"      # Logging
+log = "0.4"      # Logging
 env_logger = "0.10"  # Logging setup
 parking_lot = "0.12"  # Better RwLock implementation
 ordered-float = "3.7"  # Ordered floating point comparisons
@@ -31,25 +31,25 @@ chrono = { version = "0.4", features = ["serde"] }      # Date and time handling
 
 # Web server dependencies
 axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1.36.0", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-futures = "0.3.30"
-uuid = { version = "1.4", features = ["v4", "serde"] }
+futures = "0.3"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 tungstenite = "0.24"
 tokio-tungstenite = "0.24"
-actix-web = "4.4.0"
+actix-web = "4.0"
 dotenv = "0.15.0"
-actix-cors = "0.6.4"
+actix-cors = "0.6"
 actix-web-actors = "4.2.0"
 actix = "0.13.1"
 actix-files = "0.6.5"
 
 # Optional Python dependencies
-pyo3 = { version = "0.19", features = ["extension-module"] }
-numpy = "0.19"
+pyo3 = { version = "0.20", features = ["extension-module"] }
+numpy = "0.20"
 actix-web-httpauth = "0.8"
 jsonwebtoken = "9.2"
 
@@ -61,6 +61,10 @@ pretty_assertions = "1.4"  # For better test output
 # Security dependencies
 jsonwebtoken = "9.2"
 actix-web-httpauth = "0.8"
+
+# Performance and optimization
+lru = "0.11"  # For caching
+async-trait = "0.1.77"  # For async traits
 
 [lib]
 name = "rival_ai"
@@ -75,4 +79,5 @@ path = "src/bin/play.rs"
 name = "server"
 path = "src/bin/server.rs"
 
-async-trait = "0.1.77"
+[build-dependencies]
+pyo3-build-config = "0.20"

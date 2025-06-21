@@ -5,7 +5,7 @@ import useStore from '../store/store';
 import type { GameState } from '../store/types';
 
 interface ChessGameProps {
-  onMove: (move: string) => void;
+  onMove?: (move: string) => void;
   onGameOver: (status: string) => void;
   showCoordinates?: boolean;
   animationDuration?: number;
@@ -195,18 +195,23 @@ export function ChessGame({
     
     const moveString = `${promoteFromSquare}${promoteToSquare}${promotionPiece}`;
 
+    console.log('🎯 Component making promotion move:', moveString, {
+      gameId: currentGame?.metadata?.game_id || currentGame?.game_id,
+      currentBoard: currentGame?.board,
+      loading: loading,
+      isPlayerTurn: currentGame?.is_player_turn
+    });
+
     makeMove(moveString)
       .then(() => {
-        if (currentGame?.board) {
-          onMove(moveString);
-        }
+        console.log('✅ Promotion move completed successfully:', moveString);
       })
-      .catch(() => {
-        // Completely silent
+      .catch((error) => {
+        console.log('❌ Promotion move failed:', moveString, error.message);
       });
 
     return true;
-  }, [makeMove, currentGame, onMove]);
+  }, [makeMove, currentGame, onMove, loading]);
 
   // Fix the onPieceDrop to NOT make moves for promotions
   const onPieceDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
@@ -223,19 +228,24 @@ export function ChessGame({
       
       const moveString = `${sourceSquare}${targetSquare}`;
       
+      console.log('🎯 Component making move:', moveString, {
+        gameId: currentGame?.metadata?.game_id || currentGame?.game_id,
+        currentBoard: currentGame?.board,
+        loading: loading,
+        isPlayerTurn: currentGame?.is_player_turn
+      });
+      
       makeMove(moveString)
         .then(() => {
-          if (currentGame?.board) {
-            onMove(moveString);
-          }
+          console.log('✅ Move completed successfully:', moveString);
         })
-        .catch((_error) => {
-          // Don't log to console, but still handle the error properly
+        .catch((error) => {
+          console.log('❌ Move failed:', moveString, error.message);
         });
     }
     
     return result;
-  }, [onDrop, makeMove, currentGame, onMove]);
+  }, [onDrop, makeMove, currentGame, onMove, loading]);
 
   const onSquareClick = useCallback((square: Square) => {
     if (!viewOnly && !isInitializing && !loading) {

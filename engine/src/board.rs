@@ -1,3 +1,4 @@
+#![allow(non_local_definitions)]
 use chess::{Board as ChessBoard, ChessMove, Square, Piece, Color, BoardStatus, BitBoard, MoveGen};
 use std::str::FromStr;
 use std::fmt;

@@ -27,6 +27,9 @@ export type GameStatus =
 
 export interface MoveRequest {
   move_str: string;
+  game_id: string;
+  board: string;
+  player_color: string;
 }
 
 export interface MoveResponse {
@@ -36,6 +39,7 @@ export interface MoveResponse {
   engine_move: string | null;
   is_player_turn: boolean;
   error_message: string | null;
+  move_history: string[];
 }
 
 export interface GameSettings {
