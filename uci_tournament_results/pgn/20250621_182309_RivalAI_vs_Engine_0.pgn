@@ -1,7 +1,0 @@
-[Event "UCI Tournament"]
-[Date "2025.06.21"]
-[White "Engine_0"]
-[Black "RivalAI"]
-[Result "1-0"]
-
-1. e4 Nh6 2. Nc3 Ng8 3. d4 h5 4. Nf3 f6 5. Nh4 b5 6. Be2 g6 7. Nxg6 Nh6 8. Nxh8 c6 9. Bxh5+ Nf7 10. Bxf7# 1-0
