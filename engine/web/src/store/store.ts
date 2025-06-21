@@ -354,12 +354,12 @@ const useStore = create<StoreState>((set, get) => {
                   console.log('Stats refresh successful!');
                   set({ modelStats: refreshResponse.data[statsKey] });
                   
-                  // Also refresh recent games when stats are refreshed
-                  try {
-                    const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
-                    set({ recentGames: recentGamesResponse.data });
-                  } catch (recentGamesError) {
-                    console.warn('Failed to refresh recent games:', recentGamesError);
+                            // Also refresh recent games when stats are refreshed
+          try {
+            const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+            set({ recentGames: Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [] });
+          } catch (recentGamesError) {
+            console.warn('Failed to refresh recent games:', recentGamesError);
                   }
                   return;
                 }
@@ -384,7 +384,7 @@ const useStore = create<StoreState>((set, get) => {
           // Always refresh recent games when loading stats for a mode
           try {
             const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
-            set({ recentGames: recentGamesResponse.data });
+            set({ recentGames: Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [] });
           } catch (recentGamesError) {
             console.warn('Failed to load recent games:', recentGamesError);
           }
@@ -429,7 +429,7 @@ const useStore = create<StoreState>((set, get) => {
           // Load recent games
           try {
             const response = await axios.get(`${API_BASE_URL}/recent-games`);
-            set({ recentGames: response.data });
+            set({ recentGames: Array.isArray(response.data) ? response.data : [] });
 
             // Load current game if there's an active one
             const activeGame = response.data.find((game: any) => game.status === 'active');

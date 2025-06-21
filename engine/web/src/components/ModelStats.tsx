@@ -35,7 +35,8 @@ const ModelStats: React.FC = memo(() => {
   
   // Get last 10 completed games for the current mode, sorted by most recent
   // Add date validation to filter out games with invalid dates
-  const completedGames = recentGames
+  // Ensure recentGames is always an array to prevent "filter is not a function" errors
+  const completedGames = (Array.isArray(recentGames) ? recentGames : [])
     .filter(game => {
       // Filter out active games and games with invalid dates
       if (game.status === 'active') return false;
