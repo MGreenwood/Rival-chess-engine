@@ -1,0 +1,16 @@
+[Unit]
+Description=RivalAI Game Processor Service
+After=network.target
+
+[Service]
+Type=simple
+User=rival_ai
+Group=rival_ai
+WorkingDirectory=/path/to/rival_ai/python
+Environment=PYTHONPATH=/path/to/rival_ai/python/src
+ExecStart=/path/to/rival_ai/python/venv/bin/python scripts/process_saved_games.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

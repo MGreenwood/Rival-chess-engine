@@ -12,7 +12,7 @@ use chess::{Board, ChessMove, MoveGen, BoardStatus, Color};
 use crate::ModelBridge;
 
 // Constants
-const DEFAULT_NUM_SIMULATIONS: u32 = 1000;
+const DEFAULT_NUM_SIMULATIONS: u32 = 2500;
 const DEFAULT_TEMPERATURE: f32 = 1.0;
 const DEFAULT_C_PUCT: f32 = 1.0;
 const DEFAULT_DIRICHLET_ALPHA: f32 = 0.3;
@@ -241,45 +241,39 @@ impl MCTS {
         }
     }
 
-    pub fn get_best_move_with_time(&mut self, board: &Board, time_limit: Duration, temperature: Option<f32>) -> Result<ChessMove> {
-        let policy = self.search_with_time(board, time_limit)?;
+    pub fn get_best_move_with_time(&mut self, board: &Board, time_limit: Duration) -> Result<ChessMove> {
+        let root = Arc::new(Node::new(0.0));
+        let start_time = Instant::now();
+        let mut simulation_count = 0;
+        
+        // Run simulations until time limit is reached
+        while start_time.elapsed() < time_limit {
+            self.run_simulation(board, Arc::clone(&root))?;
+            simulation_count += 1;
+            
+            // Safety check to prevent infinite loops
+            if simulation_count > 100_000 {
+                break;
+            }
+        }
+        
+        println!("MCTS completed {} simulations in {:?}", simulation_count, start_time.elapsed());
+        
+        // Get policy from root node and select best move
+        let temperature = self.config.temperature;
+        let policy = root.get_policy(temperature);
         
         if policy.is_empty() {
             return Err(anyhow::anyhow!("No legal moves available"));
         }
         
-        let temp = temperature.unwrap_or(self.config.temperature);
-        let mut rng = self.rng.lock().map_err(|e| anyhow::anyhow!("Failed to acquire RNG lock: {}", e))?;
-        
-        if temp <= 0.01 {
-            // Deterministic selection
-            let best_move = policy.iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
-                .map(|(mv, _)| *mv)
-                .unwrap();
-            Ok(best_move)
-        } else {
-            // Temperature-based selection
-            let moves: Vec<_> = policy.into_iter().collect();
-            let total_prob: f32 = moves.iter().map(|(_, prob)| prob).sum();
+        // Select best move from policy
+        let best_move = policy.iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(mv, _)| *mv)
+            .unwrap();
             
-            if total_prob <= 0.0 {
-                return Err(anyhow::anyhow!("Invalid policy probabilities"));
-            }
-            
-            let mut cumsum = 0.0;
-            let rand_val: f32 = rng.gen();
-            
-            for (mv, prob) in &moves {
-                cumsum += prob / total_prob;
-                if rand_val <= cumsum {
-                    return Ok(*mv);
-                }
-            }
-            
-            // Fallback to first move
-            Ok(moves[0].0)
-        }
+        Ok(best_move)
     }
     
     pub fn get_move_probabilities(&mut self, board: &Board) -> Result<Vec<(ChessMove, f32)>> {

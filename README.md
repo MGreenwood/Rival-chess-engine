@@ -1,6 +1,6 @@
 # RivalAI Chess Engine
 
-A novel chess engine implementing the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions. CHESS transforms chess positions into rich graph structures, known as Positional Adjacency Graphs (PAG), that capture piece relationships, strategic importance, and positional dynamics.
+A novel chess engine coining the Chess Heterogeneous Encoding State System (CHESS) for position representation, combined with Monte Carlo Tree Search (MCTS) and Graph Neural Networks (GNNs) for evaluation and policy decisions. CHESS transforms chess positions into rich graph structures, known as Positional Adjacency Graphs (PAG), that capture piece relationships, strategic importance, and positional dynamics.
 
 ## Project Structure
 
@@ -8,18 +8,81 @@ A novel chess engine implementing the Chess Heterogeneous Encoding State System 
 rival_ai/
 ├── engine/           # Rust core engine
 │   ├── src/         # Core chess logic and implementation
+│   │   ├── game_storage.rs  # Game persistence system
+│   │   ├── mcts.rs         # Monte Carlo Tree Search
+│   │   ├── pag/           # Position Analysis Graph
+│   │   └── bin/          # Binary executables
 │   ├── examples/    # Example usage and tests
 │   └── web/         # Web interface components
-├── python/          # Python training and analysis
-│   ├── src/        # Core Python implementation
-│   ├── scripts/    # Training and utility scripts
-│   └── analysis/   # Analysis tools and notebooks
-├── analysis/        # Project-wide analysis tools
-├── scripts/         # Utility scripts
-├── experiments/     # Training experiment outputs
-├── self_play_data/ # Generated self-play games
-└── logs/           # Training and runtime logs
+│       ├── src/    # React frontend
+│       │   ├── components/  # UI components
+│       │   │   ├── Chessboard.tsx    # Chess board visualization
+│       │   │   ├── CommunityGame.tsx # Community voting interface
+│       │   │   └── ModelStats.tsx    # Engine statistics
+│   ├── python/          # Python training and analysis
+│   │   ├── src/        # Core Python implementation
+│   │   ├── scripts/    # Training and utility scripts
+│   │   └── analysis/   # Analysis tools and notebooks
+│   ├── analysis/        # Project-wide analysis tools
+│   ├── scripts/         # Utility scripts
+│   ├── experiments/     # Training experiment outputs
+│   └── self_play_data/ # Generated self-play games
+│   └── logs/           # Training and runtime logs
 ```
+
+## Game Modes
+
+RivalAI now supports two distinct game modes:
+
+### 1. Single Player Mode
+- Traditional one-on-one gameplay against the AI
+- Full engine strength with MCTS and neural network evaluation
+- Move history and analysis
+- Game state persistence
+- Customizable player color
+
+### 2. Community Mode
+- Collaborative gameplay where multiple players vote on moves
+- 10-second voting window for each move
+- Real-time vote tallying
+- Move suggestions from all connected players
+- Random selection between tied moves
+- Ability to change votes during voting window
+- Game state persistence with voting history
+
+## Game Storage System
+
+RivalAI implements a robust game storage system that preserves game states and supports multiple game modes:
+
+### Storage Structure
+```
+games/
+├── single_player/   # Single player game files
+│   └── [game_id].json
+└── community/       # Community game files
+    └── [game_id].json
+```
+
+### Game Metadata
+Each saved game includes:
+- Game ID (UUID)
+- Game mode (single/community)
+- Creation timestamp
+- Last move timestamp
+- Game status
+- Total moves
+- Player color
+- Player name (optional)
+- Engine version
+
+### Features
+- Automatic game state persistence
+- Game resume capability
+- Historical game browsing
+- Mode-specific storage
+- Rich game metadata
+- Efficient JSON storage
+- Directory-based organization
 
 ## Model Architecture
 
@@ -285,6 +348,4 @@ Then open your browser to `http://localhost:6006` to view:
 
 See [DESIGN.md](DESIGN.md) for detailed architecture documentation and [MILESTONES.md](MILESTONES.md) for development roadmap.
 
-## License
 
-MIT License - See LICENSE file for details 

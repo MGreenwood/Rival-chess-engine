@@ -108,4 +108,8 @@ venv/
 env/
 ENV/
 .env
-.venv 
+.venv
+
+# Cloudflare tunnel credentials and generated files
+cloudflare-tunnel/*.json
+cloudflare-tunnel/tunnel-config-generated.yml
