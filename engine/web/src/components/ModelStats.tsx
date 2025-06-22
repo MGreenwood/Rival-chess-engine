@@ -9,6 +9,15 @@ const ModelStats: React.FC = memo(() => {
   useEffect(() => {
     uiActions.loadStatsForMode(currentMode);
   }, [currentMode, uiActions]);
+
+  // Debug logging (temporary)
+  useEffect(() => {
+    console.log('ModelStats Debug:', {
+      currentMode,
+      recentGamesCount: recentGames.length,
+      firstFewGames: recentGames.slice(0, 3)
+    });
+  }, [recentGames, currentMode]);
   
   if (!modelStats) {
     return (
@@ -38,18 +47,37 @@ const ModelStats: React.FC = memo(() => {
   // Ensure recentGames is always an array to prevent "filter is not a function" errors
   const completedGames = (Array.isArray(recentGames) ? recentGames : [])
     .filter(game => {
-      // Filter out active games and games with invalid dates
-      if (game.status === 'active') return false;
+      console.log('Filtering game:', { 
+        game_id: game.game_id, 
+        status: game.status, 
+        mode: game.mode, 
+        currentMode, 
+        last_move_at: game.last_move_at 
+      });
+      
+      // Don't filter out active games for now - let's see all games
+      // if (game.status === 'active') return false;
       
       // Filter by current mode (show single-player games for 'single' mode, community games for 'community' mode)
       const gameMode = game.mode;
-      if (currentMode === 'single' && gameMode !== 'single') return false;
-      if (currentMode === 'community' && gameMode !== 'community') return false;
+      if (currentMode === 'single' && gameMode !== 'single') {
+        console.log('Filtered out: wrong mode for single', game.game_id);
+        return false;
+      }
+      if (currentMode === 'community' && gameMode !== 'community') {
+        console.log('Filtered out: wrong mode for community', game.game_id);
+        return false;
+      }
       
       try {
         const date = new Date(game.last_move_at);
-        return isValid(date);
+        if (!isValid(date)) {
+          console.log('Filtered out: invalid date', game.game_id, game.last_move_at);
+          return false;
+        }
+        return true;
       } catch {
+        console.log('Filtered out: date parse error', game.game_id);
         return false;
       }
     })
@@ -191,12 +219,21 @@ const ModelStats: React.FC = memo(() => {
             })}
           </div>
         ) : (
-          <p className="text-gray-500 dark:text-gray-400 text-sm">
-            {currentMode === 'community' 
-              ? 'No community games played yet. Join the community challenge to start playing!'
-              : 'No training games played yet. Start a training game to help improve the AI!'
-            }
-          </p>
+          <div>
+            <p className="text-gray-500 dark:text-gray-400 text-sm mb-2">
+              {currentMode === 'community' 
+                ? 'No community games played yet. Join the community challenge to start playing!'
+                : 'No training games played yet. Start a training game to help improve the AI!'
+              }
+            </p>
+            {/* Debug info */}
+            <div className="text-xs text-gray-400 mt-2 p-2 bg-gray-100 dark:bg-gray-700 rounded">
+              <div>Debug: Total recent games: {recentGames.length}</div>
+              <div>Current mode: {currentMode}</div>
+              <div>Games for mode: {recentGames.filter(g => g.mode === currentMode).length}</div>
+              <div>Active games: {recentGames.filter(g => g.status === 'active').length}</div>
+            </div>
+          </div>
         )}
       </div>
     </div>

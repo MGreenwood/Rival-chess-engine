@@ -8,13 +8,46 @@ const getApiBaseUrl = (): string => {
   const host = window.location.host;
   const protocol = window.location.protocol; // Use current protocol
   
+  console.log('🌐 getApiBaseUrl debug:', { host, protocol, location: window.location.href });
+  
   // If accessing via localhost, use localhost:3000 with current protocol
   if (host.includes('localhost') || host.includes('127.0.0.1')) {
-    return `${protocol}//localhost:3000`;
+    const apiUrl = `${protocol}//localhost:3000`;
+    console.log('🏠 Using localhost API URL:', apiUrl);
+    return apiUrl;
+  }
+  
+  // For rivalchess.xyz, use the main domain (likely behind a reverse proxy)
+  if (host === 'rivalchess.xyz') {
+    // The backend is likely running on the same domain through a reverse proxy
+    // or on a different port. Try the main domain first.
+    const apiUrl = `${protocol}//rivalchess.xyz`;
+    console.log('🏆 Using rivalchess.xyz API URL:', apiUrl);
+    console.log('💡 If backend is on different port, update this to use :3000 or :8000');
+    return apiUrl;
   }
   
   // Otherwise use the current protocol and host (tunnel)
-  return `${protocol}//${host}`;
+  const apiUrl = `${protocol}//${host}`;
+  console.log('🌍 Using tunnel API URL:', apiUrl);
+  return apiUrl;
+};
+
+// Alternative API URLs to try if the primary fails
+const getApiAlternatives = (): string[] => {
+  const host = window.location.host;
+  const protocol = window.location.protocol;
+  
+  if (host === 'rivalchess.xyz') {
+    return [
+      `${protocol}//rivalchess.xyz`,
+      `${protocol}//rivalchess.xyz:3000`,
+      `${protocol}//rivalchess.xyz:8000`,
+      `${protocol}//rivalchess.xyz/api`
+    ];
+  }
+  
+  return [`${protocol}//${host}`];
 };
 
 const API_BASE_URL = getApiBaseUrl();
@@ -356,10 +389,13 @@ const useStore = create<StoreState>((set, get) => {
                   
                             // Also refresh recent games when stats are refreshed
           try {
+            console.log('🔄 Refreshing recent games from:', `${API_BASE_URL}/recent-games`);
             const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+            console.log('📥 Refresh recent games response:', recentGamesResponse.data?.length || 0, 'games');
             set({ recentGames: Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [] });
           } catch (recentGamesError) {
-            console.warn('Failed to refresh recent games:', recentGamesError);
+            console.error('❌ Failed to refresh recent games:', recentGamesError);
+            set({ recentGames: [] });
                   }
                   return;
                 }
@@ -383,10 +419,21 @@ const useStore = create<StoreState>((set, get) => {
           
           // Always refresh recent games when loading stats for a mode
           try {
+            console.log('🔄 Loading recent games from:', `${API_BASE_URL}/recent-games`);
             const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+            console.log('📥 Recent games response:', {
+              status: recentGamesResponse.status,
+              dataType: typeof recentGamesResponse.data,
+              isArray: Array.isArray(recentGamesResponse.data),
+              length: recentGamesResponse.data?.length,
+              data: recentGamesResponse.data
+            });
             set({ recentGames: Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [] });
+            console.log('✅ Recent games set in store:', recentGamesResponse.data?.length || 0, 'games');
           } catch (recentGamesError) {
-            console.warn('Failed to load recent games:', recentGamesError);
+            console.error('❌ Failed to load recent games:', recentGamesError);
+            console.error('API URL was:', `${API_BASE_URL}/recent-games`);
+            set({ recentGames: [] });
           }
         } catch (error) {
           console.error('Failed to load stats for mode:', mode, error);
@@ -428,11 +475,38 @@ const useStore = create<StoreState>((set, get) => {
 
           // Load recent games
           try {
+            console.log('🏁 Init: Loading recent games from:', `${API_BASE_URL}/recent-games`);
             const response = await axios.get(`${API_BASE_URL}/recent-games`);
-            set({ recentGames: Array.isArray(response.data) ? response.data : [] });
+            console.log('📥 Init recent games response:', {
+              type: typeof response.data,
+              isArray: Array.isArray(response.data),
+              length: response.data?.length,
+              keys: response.data ? Object.keys(response.data) : 'null',
+              data: response.data
+            });
+            
+            // Check if we got HTML instead of JSON (wrong endpoint)
+            if (typeof response.data === 'string' && response.data.includes('<!doctype html>')) {
+              console.error('❌ Got HTML instead of JSON - wrong API endpoint!');
+              console.error('Expected JSON from:', `${API_BASE_URL}/recent-games`);
+              console.error('But got HTML, which means:');
+              console.error('  1. The backend API server is not running');
+              console.error('  2. The API URL is incorrect');
+              console.error('  3. Routing is not set up properly');
+              console.error('');
+              console.error('🔧 To fix this:');
+              console.error('  - Ensure the backend server is running on the expected URL');
+              console.error('  - Or update the API URL in getApiBaseUrl()');
+              console.error('  - Current API_BASE_URL:', API_BASE_URL);
+              set({ recentGames: [] });
+              return;
+            }
+            
+            const games = Array.isArray(response.data) ? response.data : [];
+            set({ recentGames: games });
 
             // Load current game if there's an active one
-            const activeGame = response.data.find((game: any) => game.status === 'active');
+            const activeGame = games.find((game: any) => game.status === 'active');
             if (activeGame) {
               try {
                 await get().gameActions.loadGame(activeGame.game_id, activeGame.mode);
@@ -441,6 +515,7 @@ const useStore = create<StoreState>((set, get) => {
               }
             }
           } catch (error) {
+            console.error('❌ Init: Failed to load recent games:', error);
             set({ recentGames: [] });
           }
         } catch (error) {

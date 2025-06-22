@@ -11,7 +11,7 @@ const App: React.FC = () => {
 
   return (
     <Router>
-      <div className={theme.mode === 'dark' ? 'dark' : ''}>
+      <div className={`${theme.mode === 'dark' ? 'dark' : ''} min-h-screen bg-white dark:bg-gray-900 transition-colors`}>
         <Layout>
           <Routes>
             <Route path="/" element={<Home />} />

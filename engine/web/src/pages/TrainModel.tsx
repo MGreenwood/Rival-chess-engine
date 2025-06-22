@@ -46,14 +46,14 @@ const TrainModel: React.FC = () => {
   // Move history navigation removed
 
   return (
-    <div className="fixed inset-0 pt-14 flex">
+    <div className="fixed inset-0 pt-14 flex bg-white dark:bg-gray-900 transition-colors">
       {/* Left sidebar - Model Stats */}
       <div className="w-80 p-4 hidden lg:block overflow-y-auto">
         <ModelStats />
       </div>
 
       {/* Main game area */}
-      <div className="flex-1 flex flex-col items-center justify-start p-4 overflow-y-auto">
+      <div className="flex-1 flex flex-col items-center justify-start p-4 pb-64 lg:pb-4 overflow-y-auto">
         <div className="w-full max-w-[calc(100vh-16rem)]">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 mb-4">
             <div className="relative aspect-square">
@@ -81,8 +81,8 @@ const TrainModel: React.FC = () => {
       </div>
 
       {/* Mobile view for stats */}
-      <div className="fixed bottom-0 left-0 right-0 lg:hidden bg-gray-900">
-        <div className="p-2">
+      <div className="fixed bottom-4 left-4 right-4 lg:hidden bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg transition-colors">
+        <div className="p-3">
           <div className="overflow-y-auto max-h-48">
             <ModelStats />
           </div>

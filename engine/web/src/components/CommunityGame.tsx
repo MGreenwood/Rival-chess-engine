@@ -60,6 +60,11 @@ export const CommunityGame: React.FC = () => {
   const [previewPosition, setPreviewPosition] = useState<string | null>(null);
   const [currentUserVote, setCurrentUserVote] = useState<string | null>(null);
   const [engineThinkingStartTime, setEngineThinkingStartTime] = useState<number | null>(null);
+  const [engineThinkingElapsed, setEngineThinkingElapsed] = useState<number>(0);
+  const [voteProcessingStartTime, setVoteProcessingStartTime] = useState<number | null>(null);
+  const [showProcessingOverlay, setShowProcessingOverlay] = useState<boolean>(false);
+  const [lastVoteResults, setLastVoteResults] = useState<Record<string, number> | null>(null);
+  const [boardSize, setBoardSize] = useState<number>(600);
 
   // Create voter session on component mount
   useEffect(() => {
@@ -75,6 +80,31 @@ export const CommunityGame: React.FC = () => {
     createSession();
   }, []);
 
+  // Handle responsive board sizing
+  useEffect(() => {
+    const updateBoardSize = () => {
+      // Calculate available width considering sidebars and padding on large screens
+      const isLargeScreen = window.innerWidth >= 1024; // lg breakpoint
+      let availableWidth = window.innerWidth;
+      
+      if (isLargeScreen) {
+        // On large screens, account for both sidebars (2 * 320px) plus padding
+        availableWidth = window.innerWidth - (2 * 320) - 64; // 320px per sidebar + padding
+      } else {
+        // On mobile/tablet, just account for padding
+        availableWidth = window.innerWidth - 32;
+      }
+      
+      const maxSize = Math.min(600, availableWidth);
+      const minSize = 280;
+      setBoardSize(Math.max(minSize, maxSize));
+    };
+
+    updateBoardSize();
+    window.addEventListener('resize', updateBoardSize);
+    return () => window.removeEventListener('resize', updateBoardSize);
+  }, []);
+
   // Track previous board position and move count to detect actual changes
   const previousBoardRef = useRef<string | null>(null);
   const previousMoveCountRef = useRef<number>(0);
@@ -84,12 +114,24 @@ export const CommunityGame: React.FC = () => {
     if (gameState?.engine_thinking && !engineThinkingStartTime) {
       // Engine just started thinking
       setEngineThinkingStartTime(Date.now());
+      setEngineThinkingElapsed(0);
       console.log('🤖 Engine started thinking at:', new Date().toISOString());
     } else if (!gameState?.engine_thinking && engineThinkingStartTime) {
       // Engine stopped thinking
       const duration = Date.now() - engineThinkingStartTime;
       console.log(`🤖 Engine finished thinking after ${duration}ms`);
       setEngineThinkingStartTime(null);
+      setEngineThinkingElapsed(0);
+    }
+  }, [gameState?.engine_thinking, engineThinkingStartTime]);
+
+  // Update elapsed time for engine thinking overlay
+  useEffect(() => {
+    if (gameState?.engine_thinking && engineThinkingStartTime) {
+      const timer = setInterval(() => {
+        setEngineThinkingElapsed(Math.floor((Date.now() - engineThinkingStartTime) / 1000));
+      }, 1000);
+      return () => clearInterval(timer);
     }
   }, [gameState?.engine_thinking, engineThinkingStartTime]);
 
@@ -114,7 +156,7 @@ export const CommunityGame: React.FC = () => {
     }
   }, [gameState?.board, gameState?.move_history?.length, game]);
 
-  // Fetch game state periodically
+  // Fetch game state periodically - use faster polling during critical moments
   useEffect(() => {
     const fetchGameState = async () => {
       try {
@@ -122,7 +164,18 @@ export const CommunityGame: React.FC = () => {
         
         // Log engine thinking status for debugging
         if (response.data.engine_thinking !== gameState?.engine_thinking) {
-          console.log('Engine thinking status changed:', response.data.engine_thinking);
+          console.log('🚨 Engine thinking status changed:', response.data.engine_thinking);
+          console.log('🚨 Full game state:', response.data);
+        }
+        
+        // Log when engine starts thinking for debugging
+        if (response.data.engine_thinking && !gameState?.engine_thinking) {
+          console.log('🤖 ENGINE STARTED THINKING - OVERLAY SHOULD APPEAR NOW!');
+        }
+        
+        // Log when engine stops thinking
+        if (!response.data.engine_thinking && gameState?.engine_thinking) {
+          console.log('🔓 ENGINE STOPPED THINKING - OVERLAY SHOULD DISAPPEAR');
         }
         
         setGameState(response.data);
@@ -132,17 +185,76 @@ export const CommunityGame: React.FC = () => {
     };
 
     fetchGameState();
-    const interval = setInterval(fetchGameState, 1000);
+    
+    // Use faster polling (500ms) to catch engine thinking states more reliably
+    // During engine thinking or vote processing, we need quicker updates
+    const isActivePhase = gameState?.is_voting_phase || gameState?.engine_thinking || 
+                         (gameState?.is_voting_phase === false && timeLeft <= 0);
+    const pollInterval = isActivePhase ? 500 : 1000;
+    
+    const interval = setInterval(fetchGameState, pollInterval);
     return () => clearInterval(interval);
-  }, [gameState?.engine_thinking]);
+  }, [gameState?.engine_thinking, gameState?.is_voting_phase, timeLeft]);
 
-  // Update countdown timer with broken state detection
+  // Track when vote processing should have started and show fallback overlay
+  useEffect(() => {
+    // Show overlay ONLY when voting has ended but engine hasn't moved yet
+    if (!gameState?.is_voting_phase && !gameState?.engine_thinking && gameState?.current_votes && Object.keys(gameState.current_votes).length > 0 && !showProcessingOverlay) {
+      // Voting just ended, capture vote results and show overlay
+      setLastVoteResults(gameState.current_votes);
+      setVoteProcessingStartTime(Date.now());
+      console.log('🗳️ VOTING ENDED - SHOWING PROCESSING OVERLAY');
+      setShowProcessingOverlay(true);
+    } else if (gameState?.engine_thinking) {
+      // Engine is thinking - keep overlay but update state
+      console.log('🤖 ENGINE THINKING DETECTED - KEEPING OVERLAY');
+      if (voteProcessingStartTime) {
+        setEngineThinkingStartTime(voteProcessingStartTime); // Transfer the start time
+        setVoteProcessingStartTime(null);
+      }
+    } else if (gameState?.is_voting_phase) {
+      // Voting restarted - hide overlay and clear all engine thinking state
+      console.log('🗳️ NEW VOTING PHASE STARTED - HIDING OVERLAY');
+      setShowProcessingOverlay(false);
+      setVoteProcessingStartTime(null);
+      setEngineThinkingStartTime(null);
+      setEngineThinkingElapsed(0);
+    }
+  }, [gameState?.is_voting_phase, gameState?.engine_thinking, gameState?.current_votes, showProcessingOverlay, voteProcessingStartTime]);
+
+  // Hide processing overlay when moves are detected (engine finished)
+  useEffect(() => {
+    const currentMoveCount = gameState?.move_history?.length || 0;
+    if (previousMoveCountRef.current < currentMoveCount) {
+      console.log('🎯 NEW MOVE DETECTED - HIDING PROCESSING OVERLAY');
+      console.log('Previous move count:', previousMoveCountRef.current, 'Current:', currentMoveCount);
+      setShowProcessingOverlay(false);
+      setVoteProcessingStartTime(null);
+      setEngineThinkingStartTime(null);
+      setEngineThinkingElapsed(0);
+      // Note: previousMoveCountRef.current is updated elsewhere in the board effect
+    }
+  }, [gameState?.move_history?.length]);
+
+  // Also hide overlay when engine thinking flag goes false (backup method)
+  useEffect(() => {
+    if (!gameState?.engine_thinking && (voteProcessingStartTime || engineThinkingStartTime)) {
+      console.log('🔓 ENGINE THINKING ENDED - HIDING OVERLAY (backup method)');
+      setShowProcessingOverlay(false);
+      setVoteProcessingStartTime(null);
+      setEngineThinkingStartTime(null);
+      setEngineThinkingElapsed(0);
+    }
+  }, [gameState?.engine_thinking, voteProcessingStartTime, engineThinkingStartTime]);
+
+  // Update countdown timer with improved broken state detection
   useEffect(() => {
     console.log('Timer effect - voting_ends_at:', gameState?.voting_ends_at, 'is_voting_phase:', gameState?.is_voting_phase);
     
     if (!gameState?.voting_ends_at || !gameState?.is_voting_phase) {
       setTimeLeft(0);
       setIsTimerBroken(false);
+      setVoteProcessingStartTime(null);
       return;
     }
 
@@ -153,13 +265,20 @@ export const CommunityGame: React.FC = () => {
       console.log('Timer update - endTime:', endTime, 'now:', now, 'diff:', diff);
       setTimeLeft(diff);
       
-      // Detect if timer has been stuck at 0 for too long
-      // BUT don't flag as broken if engine is thinking (that's normal after voting ends)
+      // Check if we've been waiting too long for vote processing to complete
       if (diff <= 0 && gameState?.is_voting_phase && !gameState?.engine_thinking) {
-        console.log('Voting phase should have ended, timer expired, and engine is not thinking');
-        setIsTimerBroken(true);
-      } else if (gameState?.engine_thinking) {
-        // Clear broken state if engine starts thinking (this is normal progression)
+        if (voteProcessingStartTime) {
+          const processingTime = Date.now() - voteProcessingStartTime;
+          // Only flag as broken if we've been waiting more than 8 seconds for vote processing
+          if (processingTime > 8000) {
+            console.log(`Vote processing stuck for ${processingTime}ms - flagging as broken`);
+            setIsTimerBroken(true);
+          } else {
+            console.log(`Vote processing in progress: ${processingTime}ms elapsed (max 8s)`);
+          }
+        }
+      } else if (gameState?.engine_thinking || !gameState?.is_voting_phase) {
+        // Clear broken state if engine starts thinking OR voting phase ends (normal progression)
         setIsTimerBroken(false);
       }
     };
@@ -437,16 +556,16 @@ export const CommunityGame: React.FC = () => {
   }
 
   if (!gameState) {
-    return <div>Loading...</div>;
+    return <div className="text-gray-900 dark:text-gray-100">Loading...</div>;
   }
 
   return (
     <div className="flex flex-col items-center w-full max-w-4xl mx-auto">
       {/* Header */}
       <div className="flex flex-col items-center mb-6">
-        <h2 className="text-2xl font-bold">Community vs AI</h2>
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Community vs AI</h2>
         {gameState.experiment_name && (
-          <div className="text-lg text-gray-600">
+          <div className="text-lg text-gray-600 dark:text-gray-300">
             Playing against: {gameState.experiment_name}
           </div>
         )}
@@ -454,7 +573,7 @@ export const CommunityGame: React.FC = () => {
 
       {/* Game Status - Moved to top for visibility */}
       <div className="mb-6 text-center w-full">
-        <div className="text-lg font-semibold mb-4">
+        <div className="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">
           {getStatusMessage()}
         </div>
         
@@ -475,7 +594,8 @@ export const CommunityGame: React.FC = () => {
         )}
 
         {/* Emergency Recovery - Should be rare with auto-processing */}
-        {isTimerBroken && (
+        {/* Only show if timer is broken AND engine is not thinking */}
+        {isTimerBroken && !gameState?.engine_thinking && (
           <div className="bg-red-100 border border-red-300 text-red-800 px-4 py-3 rounded-lg mb-4 mx-auto max-w-2xl">
             <div className="font-semibold mb-2">⚠️ Voting Issue Detected</div>
             <div className="text-sm mb-3">
@@ -493,37 +613,99 @@ export const CommunityGame: React.FC = () => {
         )}
       </div>
 
-      {/* Chessboard - Centered */}
-      <div className="w-full max-w-[600px] aspect-square mb-6">
+      {/* Chessboard - Centered with Engine Thinking Overlay */}
+      <div className="w-full aspect-square mb-6 relative" style={{ maxWidth: `${boardSize}px` }}>
         <Chessboard
           position={previewPosition || gameState.board}
           onSquareClick={handleSquareClick}
           onPieceDrop={handlePieceDrop}
-          boardWidth={600}
+          boardWidth={boardSize}
           customSquareStyles={customSquareStyles}
           boardOrientation="white"
           arePiecesDraggable={gameState?.can_vote && !gameState?.engine_thinking}
         />
+        
+                {/* Engine Thinking/Vote Processing Overlay */}
+        {(gameState?.engine_thinking || showProcessingOverlay) && (
+          <div className="absolute inset-0 bg-black dark:bg-black bg-opacity-60 dark:bg-opacity-70 flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-gray-800 rounded-lg px-8 py-6 shadow-2xl text-center border-2 border-blue-500 dark:border-blue-400 max-w-md transition-colors">
+              <div className="flex items-center justify-center space-x-3 mb-4">
+                <div className="animate-spin rounded-full h-10 w-10 border-b-4 border-blue-500 dark:border-blue-400"></div>
+                <div className="text-2xl font-bold text-gray-800 dark:text-gray-100">
+                  🤖 Engine is thinking...
+                </div>
+              </div>
+              
+              {/* Vote Results */}
+              {lastVoteResults && Object.keys(lastVoteResults).length > 0 && (
+                <div className="mb-4">
+                  <div className="text-lg font-semibold text-gray-700 dark:text-gray-200 mb-3">
+                    🗳️ Vote Results
+                  </div>
+                  {Object.entries(lastVoteResults)
+                    .sort(([,a], [,b]) => b - a) // Sort by vote count descending
+                    .map(([move, count], index) => {
+                      const totalVotes = Object.values(lastVoteResults).reduce((sum, c) => sum + c, 0);
+                      const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
+                      const isWinner = index === 0;
+                      
+                      return (
+                        <div key={move} className={`flex justify-between items-center py-2 px-3 rounded transition-colors ${
+                          isWinner ? 'bg-green-100 dark:bg-green-900 border-2 border-green-400 dark:border-green-500' : 'bg-gray-50 dark:bg-gray-700'
+                        }`}>
+                          <div className="flex items-center space-x-2">
+                            {isWinner && <span className="text-green-600 dark:text-green-400 font-bold">👑</span>}
+                            <span className={`font-mono ${isWinner ? 'text-xl font-bold text-green-800 dark:text-green-200' : 'text-lg text-gray-800 dark:text-gray-200'}`}>
+                              {move}
+                            </span>
+                            {isWinner && <span className="text-green-600 dark:text-green-400 text-sm font-semibold">WINNER</span>}
+                          </div>
+                          <div className="text-right">
+                            <div className={`${isWinner ? 'text-lg font-bold text-green-800 dark:text-green-200' : 'text-sm font-semibold text-gray-700 dark:text-gray-300'}`}>
+                              {count} vote{count !== 1 ? 's' : ''}
+                            </div>
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {percentage}%
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+              
+              {engineThinkingStartTime && (
+                <div className="text-lg text-blue-600 dark:text-blue-400 font-semibold mb-2">
+                  {engineThinkingElapsed}s elapsed
+                </div>
+              )}
+              
+              <div className="text-sm text-gray-600 dark:text-gray-300">
+                Running MCTS simulations... (up to 10s)
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Vote Tally - Below chessboard */}
       {gameState.current_votes && Object.keys(gameState.current_votes).length > 0 && (
-        <div className="mb-4 p-4 bg-gray-800 rounded-lg w-full max-w-2xl">
-          <h3 className="text-lg font-semibold mb-2 text-white text-center">
+        <div className="mb-4 p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg w-full max-w-2xl transition-colors">
+          <h3 className="text-lg font-semibold mb-2 text-gray-900 dark:text-white text-center">
             Current Votes
           </h3>
           <div className="grid grid-cols-2 gap-4">
             {Object.entries(gameState.current_votes)
               .sort(([,a], [,b]) => b - a) // Sort by vote count descending
               .map(([move, count]) => (
-              <div key={move} className="flex justify-between text-white">
+              <div key={move} className="flex justify-between text-gray-900 dark:text-white">
                 <span className="font-mono">{move}</span>
                 <span className="ml-4 font-bold">{count} vote{count !== 1 ? 's' : ''}</span>
               </div>
             ))}
           </div>
           {Object.keys(gameState.current_votes).length > 0 && !gameState.is_voting_phase && (
-            <div className="mt-2 text-sm text-gray-400 text-center">
+            <div className="mt-2 text-sm text-gray-500 dark:text-gray-400 text-center">
               Timer finished - processing votes...
             </div>
           )}

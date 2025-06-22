@@ -3,44 +3,23 @@ import { Link } from 'react-router-dom';
 
 const Home: React.FC = () => {
   return (
-    <div className="pt-20 min-h-screen bg-gray-900 text-white">
-      <div className="absolute left-1/2 transform -translate-x-1/2 w-full max-w-7xl px-8">
+    <div className="pt-20 pb-8 bg-white dark:bg-gray-900 text-gray-900 dark:text-white transition-colors">
+      <div className="relative max-w-7xl mx-auto px-8">
         {/* Hero Section */}
         <div className="text-center mb-12">
           <h1 className="text-6xl font-bold mb-8">Welcome to Rival Chess</h1>
-          <p className="text-xl text-gray-300 max-w-3xl mx-auto leading-relaxed">
+          <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto leading-relaxed">
             Help train and challenge a state-of-the-art Graph Neural Network chess engine 
             through gameplay and collaborative decision making.
           </p>
         </div>
 
-        {/* Disclaimer Banner */}
-        <div className="mb-16 max-w-5xl mx-auto">
-          <div className="bg-gradient-to-r from-red-900 to-orange-900 border-2 border-red-600 rounded-xl p-8 text-center">
-            <div className="flex justify-center items-center mb-4">
-              
-              <h2 className="text-2xl font-bold text-yellow-300">⚠️ EXPERIMENTAL SOFTWARE ⚠️</h2>
-            </div>
-            <div className="text-white text-lg leading-relaxed space-y-3">
-              <p className="font-semibold">
-                This is a work-in-progress research project with <span className="text-yellow-300 font-bold">NO GUARANTEES</span> of uptime or functionality.
-              </p>
-              <p>
-                • The AI model is in active development and may behave unpredictably<br/>
-                • Server may go down at any time without notice<br/>
-                • Features may break, change, or disappear entirely<br/>
-                • No user data persistence is guaranteed
-              </p>
-            </div>
-          </div>
-        </div>
-
         {/* Game Modes */}
         <div className="grid md:grid-cols-2 gap-12 mb-16 max-w-5xl mx-auto">
           {/* Training Mode */}
-          <div className="bg-gray-800 rounded-xl p-8 text-center transform transition-transform hover:scale-105">
-            <h2 className="text-2xl font-bold mb-4">Train the Model</h2>
-            <p className="text-gray-300 mb-8 text-lg">
+          <div className="bg-gray-100 dark:bg-gray-800 rounded-xl p-8 text-center transform transition-all hover:scale-105">
+            <h2 className="text-2xl font-bold mb-4 text-gray-900 dark:text-white">Train the Model</h2>
+            <p className="text-gray-600 dark:text-gray-300 mb-8 text-lg">
               Play one-on-one against the AI and help improve its learning through your games. 
               Each game contributes to the model's training data, making it stronger over time.
             </p>
@@ -53,9 +32,9 @@ const Home: React.FC = () => {
           </div>
 
           {/* Community Mode */}
-          <div className="bg-gray-800 rounded-xl p-8 text-center transform transition-transform hover:scale-105">
-            <h2 className="text-2xl font-bold mb-4">Community Challenge</h2>
-            <p className="text-gray-300 mb-8 text-lg">
+          <div className="bg-gray-100 dark:bg-gray-800 rounded-xl p-8 text-center transform transition-all hover:scale-105">
+            <h2 className="text-2xl font-bold mb-4 text-gray-900 dark:text-white">Community Challenge</h2>
+            <p className="text-gray-600 dark:text-gray-300 mb-8 text-lg">
               Join forces with other players to challenge Rival's strongest model. 
               Vote on moves and work together to defeat the AI in this unique collaborative format.
             </p>
@@ -70,21 +49,21 @@ const Home: React.FC = () => {
 
         {/* Features Section */}
         <div className="grid md:grid-cols-3 gap-8 max-w-6xl mx-auto">
-          <div className="bg-gray-800 rounded-xl p-8 text-center transform transition-transform hover:scale-105">
-            <h3 className="text-xl font-bold mb-4">Graph Neural Network</h3>
-            <p className="text-gray-300 text-lg leading-relaxed">
+          <div className="bg-gray-100 dark:bg-gray-800 rounded-xl p-8 text-center transform transition-all hover:scale-105">
+            <h3 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">Graph Neural Network</h3>
+            <p className="text-gray-600 dark:text-gray-300 text-lg leading-relaxed">
               Experience chess against a modern AI that uses graph neural networks to understand chess positions in a way similar to humans.
             </p>
           </div>
-          <div className="bg-gray-800 rounded-xl p-8 text-center transform transition-transform hover:scale-105">
-            <h3 className="text-xl font-bold mb-4">Continuous Learning</h3>
-            <p className="text-gray-300 text-lg leading-relaxed">
+          <div className="bg-gray-100 dark:bg-gray-800 rounded-xl p-8 text-center transform transition-all hover:scale-105">
+            <h3 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">Continuous Learning</h3>
+            <p className="text-gray-600 dark:text-gray-300 text-lg leading-relaxed">
               The model learns from every game played, continuously improving its understanding and adapting to different playing styles.
             </p>
           </div>
-          <div className="bg-gray-800 rounded-xl p-8 text-center transform transition-transform hover:scale-105">
-            <h3 className="text-xl font-bold mb-4">Community Driven</h3>
-            <p className="text-gray-300 text-lg leading-relaxed">
+          <div className="bg-gray-100 dark:bg-gray-800 rounded-xl p-8 text-center transform transition-all hover:scale-105">
+            <h3 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">Community Driven</h3>
+            <p className="text-gray-600 dark:text-gray-300 text-lg leading-relaxed">
               Participate in a unique voting system where players collectively decide moves against the AI's strongest version.
             </p>
           </div>

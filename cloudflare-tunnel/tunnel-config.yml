@@ -31,6 +31,22 @@ ingress:
     path: /stats
     service: http://localhost:3000
   
+  - hostname: rivalchess.xyz
+    path: /stats/refresh
+    service: http://localhost:3000
+  
+  - hostname: rivalchess.xyz
+    path: /recent-games
+    service: http://localhost:3000
+  
+  - hostname: rivalchess.xyz
+    path: /leaderboard
+    service: http://localhost:3000
+  
+  - hostname: rivalchess.xyz
+    path: /self-play-status
+    service: http://localhost:3000
+  
   # Generic API routes - backend server
   - hostname: rivalchess.xyz
     path: /api/*

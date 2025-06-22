@@ -31,11 +31,11 @@ use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey}
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the model checkpoint file for single player games
-    #[arg(short, long, default_value = "../python/experiments/rival_ai_v1_Alice/run_20250617_221622/checkpoints/best_model.pt")]
+    #[arg(short, long, default_value = "../models/latest_trained_model.pt")]
     model_path: String,
     
     /// Path to the model checkpoint file for community games
-    #[arg(long, default_value = "../python/experiments/rival_ai_v1_Alice/run_20250618_134810/checkpoints/checkpoint_epoch_5.pt")]
+    #[arg(long, default_value = "../python/experiments/rival_ai_v1_Alice/run_20250619_162208/checkpoints/best_model.pt")]
     community_model_path: String,
     
     /// Server port
@@ -333,7 +333,31 @@ impl CommunityGame {
             // Clear votes after processing
             self.clear_votes();
 
-            // Make engine's move if it's their turn
+            // Check if the game is over after community's move BEFORE asking engine to move
+            match self.board.status() {
+                chess::BoardStatus::Checkmate => {
+                    // Determine winner: if it's white's turn and checkmate, black wins (and vice versa)
+                    self.status = if self.board.side_to_move() == chess::Color::White {
+                        GameStatus::BlackWins
+                    } else {
+                        GameStatus::WhiteWins
+                    };
+                    eprintln!("🏁 Game ended in checkmate after community move");
+                    self.save_game_state(game_storage);
+                    return Ok(());
+                }
+                chess::BoardStatus::Stalemate => {
+                    self.status = GameStatus::DrawStalemate;
+                    eprintln!("🏁 Game ended in stalemate after community move");
+                    self.save_game_state(game_storage);
+                    return Ok(());
+                }
+                _ => {
+                    // Game continues - proceed with engine move
+                }
+            }
+
+            // Make engine's move if it's their turn (and game is still ongoing)
             if self.board.side_to_move() != if self.player_is_white { chess::Color::White } else { chess::Color::Black } {
                 self.engine_thinking = true;  // Set thinking status
                 eprintln!("🤖 Engine is thinking... (engine_thinking = true)");
@@ -371,25 +395,25 @@ impl CommunityGame {
                         // Don't return error - game can continue even if engine move fails
                     }
                 }
-            }
 
-            // Check game status
-            match self.board.status() {
-                chess::BoardStatus::Checkmate => {
-                    // Determine winner: if it's white's turn and checkmate, black wins (and vice versa)
-                    self.status = if self.board.side_to_move() == chess::Color::White {
-                        GameStatus::BlackWins
-                    } else {
-                        GameStatus::WhiteWins
-                    };
-                    eprintln!("🏁 Game ended in checkmate");
-                }
-                chess::BoardStatus::Stalemate => {
-                    self.status = GameStatus::DrawStalemate;
-                    eprintln!("🏁 Game ended in stalemate");
-                }
-                _ => {
-                    // Game continues
+                // Check if the game is over after engine's move
+                match self.board.status() {
+                    chess::BoardStatus::Checkmate => {
+                        // Determine winner: if it's white's turn and checkmate, black wins (and vice versa)
+                        self.status = if self.board.side_to_move() == chess::Color::White {
+                            GameStatus::BlackWins
+                        } else {
+                            GameStatus::WhiteWins
+                        };
+                        eprintln!("🏁 Game ended in checkmate after engine move");
+                    }
+                    chess::BoardStatus::Stalemate => {
+                        self.status = GameStatus::DrawStalemate;
+                        eprintln!("🏁 Game ended in stalemate after engine move");
+                    }
+                    _ => {
+                        // Game continues
+                    }
                 }
             }
 
@@ -2238,21 +2262,117 @@ async fn check_and_process_expired_votes(data: web::Data<AppState>) {
     if needs_processing {
         println!("🕒 Timer expired! Attempting to process votes...");
         
-        // Use a longer timeout to accommodate engine thinking time (15s > 10s engine timeout)
+        // Process votes asynchronously to allow frontend polling during engine thinking
         let process_result = tokio::time::timeout(
             std::time::Duration::from_millis(15000), // 15 second timeout (longer than engine's 10s)
             async {
-                let mut game = data.game.lock().unwrap();
-                let mut engine = data.community_engine.lock().unwrap();
-                
-                // Double-check conditions after acquiring locks
-                if game.votes_started && !game.is_voting_phase() && !game.votes.is_empty() {
+                // Step 1: Process community move and set engine thinking flag
+                let (winning_move, needs_engine_move, board_for_engine) = {
+                    let mut game = data.game.lock().unwrap();
+                    
+                    // Double-check conditions after acquiring lock
+                    if !game.votes_started || game.is_voting_phase() || game.votes.is_empty() {
+                        return Ok(()); // Conditions changed, nothing to do
+                    }
+                    
                     let vote_count = game.votes.len();
                     println!("🗳️ Processing {} votes...", vote_count);
-                    game.process_votes(&mut engine, &data.game_storage)
-                } else {
-                    Ok(()) // Conditions changed, nothing to do
+                    
+                    // Get winning move and process community's turn
+                    if let Some(winning_move) = game.get_winning_move() {
+                        // Parse and make community move
+                        let chess_move = parse_move(&winning_move)?;
+                        game.make_move(chess_move)?;
+                        game.move_history.push(winning_move.clone());
+                        game.clear_votes();
+                        
+                        // Check if game ended after community move
+                        match game.board.status() {
+                            chess::BoardStatus::Checkmate => {
+                                game.status = if game.board.side_to_move() == chess::Color::White {
+                                    GameStatus::BlackWins
+                                } else {
+                                    GameStatus::WhiteWins
+                                };
+                                eprintln!("🏁 Game ended in checkmate after community move");
+                                game.save_game_state(&data.game_storage);
+                                return Ok(());
+                            }
+                            chess::BoardStatus::Stalemate => {
+                                game.status = GameStatus::DrawStalemate;
+                                eprintln!("🏁 Game ended in stalemate after community move");
+                                game.save_game_state(&data.game_storage);
+                                return Ok(());
+                            }
+                            _ => {} // Game continues
+                        }
+                        
+                        // Check if engine needs to move
+                        let needs_engine_move = game.board.side_to_move() != if game.player_is_white { 
+                            chess::Color::White 
+                        } else { 
+                            chess::Color::Black 
+                        };
+                        
+                        if needs_engine_move {
+                            game.engine_thinking = true;
+                            eprintln!("🤖 Engine is thinking... (engine_thinking = true)");
+                        }
+                        
+                        (Some(winning_move), needs_engine_move, game.board.clone())
+                    } else {
+                        (None, false, game.board.clone())
+                    }
+                };
+                
+                // Step 2: If engine needs to move, do it WITHOUT holding the game lock
+                if needs_engine_move {
+                    let engine_move_result = {
+                        // Only lock the engine, not the game
+                        let mut engine = data.community_engine.lock().unwrap();
+                        engine.get_best_move(board_for_engine)
+                    };
+                    
+                    // Step 3: Apply engine move and clear thinking flag
+                    let mut game = data.game.lock().unwrap();
+                    
+                    match engine_move_result {
+                        Some(engine_move) => {
+                            game.make_move(engine_move)?;
+                            let move_str = engine_move.to_string();
+                            game.move_history.push(move_str.clone());
+                            eprintln!("🤖 Engine played: {} (engine_thinking will be cleared)", move_str);
+                        }
+                        None => {
+                            eprintln!("⚠️ Engine failed to find a move (engine_thinking will be cleared)");
+                        }
+                    }
+                    
+                    // Always clear engine thinking flag
+                    game.engine_thinking = false;
+                    eprintln!("🔓 Engine thinking cleared (engine_thinking = false)");
+                    
+                    // Check if game ended after engine move
+                    match game.board.status() {
+                        chess::BoardStatus::Checkmate => {
+                            game.status = if game.board.side_to_move() == chess::Color::White {
+                                GameStatus::BlackWins
+                            } else {
+                                GameStatus::WhiteWins
+                            };
+                            eprintln!("🏁 Game ended in checkmate after engine move");
+                        }
+                        chess::BoardStatus::Stalemate => {
+                            game.status = GameStatus::DrawStalemate;
+                            eprintln!("🏁 Game ended in stalemate after engine move");
+                        }
+                        _ => {} // Game continues
+                    }
+                    
+                    game.save_game_state(&data.game_storage);
                 }
+                
+                Ok(())
             }
         ).await;
         
