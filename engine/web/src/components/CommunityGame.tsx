@@ -140,42 +140,61 @@ export const CommunityGame: React.FC = () => {
 
   // Add right-click handler to cancel dragging
   useEffect(() => {
+    const forceCancelDrag = () => {
+      console.log('🔴 FORCE CANCEL DRAG INITIATED');
+      
+      // Cancel our internal state
+      setSelectedSquare(null);
+      setIsDragging(false);
+      
+      // Force reset ALL pieces to their original positions
+      const allPieces = document.querySelectorAll('[data-piece]');
+      console.log(`🔴 Found ${allPieces.length} pieces to reset`);
+      
+      allPieces.forEach((piece, index) => {
+        const element = piece as HTMLElement;
+        
+        // Clear all drag-related styles
+        element.style.transform = '';
+        element.style.transition = '';
+        element.style.zIndex = '';
+        element.style.position = '';
+        element.style.left = '';
+        element.style.top = '';
+        element.style.pointerEvents = '';
+        element.style.cursor = '';
+        
+        // Remove any drag-related classes
+        element.classList.remove('dragging', 'piece-dragging');
+        
+        console.log(`🔴 Reset piece ${index + 1}: cleared all drag styles`);
+      });
+      
+      // Force re-render by updating the board position if we have game state
+      if (gameState?.board) {
+        // Create a small state change to force re-render
+        const currentBoard = gameState.board;
+        setGameState(prev => prev ? { ...prev, board: currentBoard } : null);
+        console.log('🔴 Forced board re-render');
+      }
+    };
+
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       const boardContainer = boardContainerRef.current;
       
-      // Handle right-clicks anywhere when dragging, or on board when not dragging
-      if (e.button === 2 && (isDragging || (boardContainer && boardContainer.contains(target)))) {
-        e.preventDefault();
-        e.stopPropagation();
-        
-        // Cancel our internal state
-        setSelectedSquare(null);
-        setIsDragging(false);
-        
-        // Force cancel any ongoing drag by triggering a mouseup event
-        const mouseUpEvent = new MouseEvent('mouseup', {
-          bubbles: true,
-          cancelable: true,
-          button: 0
-        });
-        
-        // Dispatch to any dragged piece or the board itself
-        const draggedPiece = document.querySelector('[data-piece][style*="transform"]');
-        if (draggedPiece) {
-          draggedPiece.dispatchEvent(mouseUpEvent);
-          console.log('🔴 FORCED DROP: Dispatched mouseup to dragged piece');
-        } else if (boardContainer) {
-          boardContainer.dispatchEvent(mouseUpEvent);
-          console.log('🔴 FORCED DROP: Dispatched mouseup to board');
-        }
-        
-        console.log('🔴 RIGHT-CLICK DETECTED - canceling drag/selection (isDragging:', isDragging, ')');
-        return;
-      }
+      console.log('🟡 MouseDown detected - button:', e.button, 'target:', target.tagName);
       
       if (boardContainer && boardContainer.contains(target)) {
-        console.log('MouseDown on board - button:', e.button, 'target:', target.tagName, 'className:', target.className);
+        if (e.button === 2) {
+          // Right-click
+          console.log('🔴 RIGHT-CLICK DETECTED via mousedown');
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          forceCancelDrag();
+          return false;
+        }
         
         // Left-click on piece - start dragging
         if (target.closest('[data-piece]') && e.button === 0) {
@@ -186,11 +205,18 @@ export const CommunityGame: React.FC = () => {
     };
 
     const handleContextMenu = (e: MouseEvent) => {
-      // Prevent context menu on chessboard
       const boardContainer = boardContainerRef.current;
-      if (boardContainer && boardContainer.contains(e.target as Node)) {
+      const target = e.target as HTMLElement;
+      
+      console.log('🟡 ContextMenu detected on:', target.tagName);
+      
+      if (boardContainer && boardContainer.contains(target)) {
+        console.log('🔴 RIGHT-CLICK DETECTED via contextmenu');
         e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
+        forceCancelDrag();
+        return false;
       }
     };
 
@@ -198,21 +224,34 @@ export const CommunityGame: React.FC = () => {
       // Clear dragging state on mouse up
       if (isDragging) {
         setIsDragging(false);
-        console.log('Finished dragging');
+        console.log('🔵 Finished dragging');
       }
     };
 
-    // Use document-level listeners with capture flag to catch events early
-    document.addEventListener('mousedown', handleMouseDown, { capture: true });
-    document.addEventListener('contextmenu', handleContextMenu, { capture: true });
-    document.addEventListener('mouseup', handleMouseUp);
+    // Be more aggressive - add listeners to both document and window
+    const options = { capture: true, passive: false };
+    
+    document.addEventListener('mousedown', handleMouseDown, options);
+    document.addEventListener('contextmenu', handleContextMenu, options);
+    document.addEventListener('mouseup', handleMouseUp, options);
+    
+    // Also add to window as backup
+    window.addEventListener('mousedown', handleMouseDown, options);
+    window.addEventListener('contextmenu', handleContextMenu, options);
+    
+    console.log('🟡 Event listeners attached');
     
     return () => {
-      document.removeEventListener('mousedown', handleMouseDown, { capture: true });
-      document.removeEventListener('contextmenu', handleContextMenu, { capture: true });
-      document.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('mousedown', handleMouseDown, options);
+      document.removeEventListener('contextmenu', handleContextMenu, options);
+      document.removeEventListener('mouseup', handleMouseUp, options);
+      
+      window.removeEventListener('mousedown', handleMouseDown, options);
+      window.removeEventListener('contextmenu', handleContextMenu, options);
+      
+      console.log('🟡 Event listeners removed');
     };
-  }, [isDragging]);
+  }, [isDragging, gameState?.board]);
 
   // Update chess.js game state when server state changes
   useEffect(() => {

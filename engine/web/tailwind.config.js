@@ -15,6 +15,24 @@ export default {
         'chess-lighter': '#363850',
         'chess-border': '#2a2b3d',
       },
+      fontFamily: {
+        // Modern & Clean
+        'inter': ['Inter', 'system-ui', 'sans-serif'],
+        'space': ['Space Grotesk', 'system-ui', 'sans-serif'],
+        'manrope': ['Manrope', 'system-ui', 'sans-serif'],
+        
+        // Popular & Friendly
+        'poppins': ['Poppins', 'system-ui', 'sans-serif'],
+        'nunito': ['Nunito', 'system-ui', 'sans-serif'],
+        
+        // Professional & Corporate
+        'source': ['Source Sans 3', 'system-ui', 'sans-serif'],
+        'roboto': ['Roboto', 'system-ui', 'sans-serif'],
+        'ibm': ['IBM Plex Sans', 'system-ui', 'sans-serif'],
+        
+        // Current system default
+        'system': ['system-ui', 'Avenir', 'Helvetica', 'Arial', 'sans-serif'],
+      },
     },
   },
   plugins: [],

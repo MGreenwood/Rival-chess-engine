@@ -40,7 +40,7 @@ const DonationButton: React.FC<DonationButtonProps> = ({
   // Get button text based on context for maximum psychological impact
   const getButtonText = () => {
     const contextButtons: Record<string, string> = {
-      'thinking': 'Buy the AI a coffee ☕',
+      'thinking': 'Buy the developer a coffee ☕',
       'victory': 'Celebrate with coffee! ☕',
       'defeat': 'Help AI improve ☕',
       'stats': 'Support this project ☕',

@@ -4,6 +4,7 @@ import Layout from './components/Layout';
 import Home from './pages/Home';
 import TrainModel from './pages/TrainModel';
 import CommunityChallenge from './pages/CommunityChallenge';
+import { FontExplorer } from './components/FontExplorer';
 import useStore from './store/store';
 
 const App: React.FC = () => {
@@ -17,6 +18,7 @@ const App: React.FC = () => {
             <Route path="/" element={<Home />} />
             <Route path="/train" element={<TrainModel />} />
             <Route path="/community" element={<CommunityChallenge />} />
+            <Route path="/fonts" element={<FontExplorer />} />
           </Routes>
         </Layout>
       </div>

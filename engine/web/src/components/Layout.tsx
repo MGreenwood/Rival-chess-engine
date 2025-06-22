@@ -10,7 +10,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 transition-colors flex flex-col">
       {/* Title Bar */}
-      <div className="fixed top-0 left-0 right-0 h-14 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center px-4 z-10 transition-colors">
+      <div className="fixed top-0 left-0 right-0 h-16 sm:h-14 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center px-4 z-10 transition-colors">
         <div className="flex-1 flex items-center">
           <Link to="/" className="text-xl font-bold text-gray-800 dark:text-gray-100 hover:text-gray-900 dark:hover:text-white transition-colors">
             Rival Chess
@@ -63,7 +63,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         </div>
       </div>
 
-      <main className="flex-1 pt-14">
+      <main className="flex-1 pt-16 sm:pt-14">
         {children}
       </main>
 

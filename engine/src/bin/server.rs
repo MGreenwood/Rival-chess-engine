@@ -51,7 +51,7 @@ struct Args {
     games_dir: String,
 
     /// Number of games needed before training starts
-    #[arg(long, default_value = "500")]
+    #[arg(long, default_value = "5000")]
     training_games_threshold: usize,
     
     /// Enable self-play background generation
@@ -71,7 +71,7 @@ struct Args {
     max_self_play_games: usize,
     
     /// Initial number of self-play games on startup
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "20")]
     initial_self_play_games: usize,
     
     /// Target GPU utilization for self-play scaling (0.0-1.0)
@@ -697,23 +697,15 @@ async fn make_move(
     let move_str = &req.move_str;
     let _player_color = &req.player_color;
 
-    // Add debug logging
-    eprintln!("🎯 Received move request: game_id={}, move={}", game_id, move_str);
-    eprintln!("📊 Request details: player_color={}", _player_color);
-
     // Load the game from memory first, then storage
     let mut game_state = {
         let mut active_games = recover_mutex(data.active_games.lock());
         if let Some(state) = active_games.get(game_id) {
-            eprintln!("📂 Loaded game from active memory (total_moves: {})", state.metadata.total_moves);
-            eprintln!("📜 Current move history: {:?}", state.move_history);
             state.clone()
         } else {
             // Try to load from persistent storage (for old games)
             match data.game_storage.load_game(game_id, &GameMode::SinglePlayer) {
                 Ok(state) => {
-                    eprintln!("💾 Loaded game from persistent storage (total_moves: {})", state.metadata.total_moves);
-                    eprintln!("📜 Persistent move history: {:?}", state.move_history);
                     // Move it to active games if it's still active
                     if state.metadata.status == GameStatus::Active {
                         active_games.insert(game_id.clone(), state.clone());
@@ -877,11 +869,7 @@ async fn make_move(
             }
         }
 
-        eprintln!("✅ Move sequence completed successfully");
-        eprintln!("🎯 Server response: success=true, player_move={}, engine_move={}", move_str, engine_move.to_string());
-        eprintln!("📋 Final move_history: {:?}", game_state.move_history);
-        eprintln!("♟️ Final board: {}", game_state.board);
-        eprintln!("🔄 Client should update to this position for next move");
+        // Move completed successfully
 
         HttpResponse::Ok().json(json!({
             "success": true,
@@ -893,9 +881,6 @@ async fn make_move(
         }))
     } else {
         eprintln!("❌ Engine failed to make a move");
-        eprintln!("🎯 Server response: success=true, player_move={}, engine_move=None", move_str);
-        eprintln!("📋 Final move_history: {:?}", game_state.move_history);
-        eprintln!("♟️ Final board: {}", game_state.board);
         
         HttpResponse::InternalServerError().json(json!({
             "success": false,
@@ -1122,14 +1107,9 @@ except ImportError as e:
     print(f"⚠️ ChessGNN not available: {{e}}")
     CHESSGNN_AVAILABLE = False
 
-# Try to import ultra-dense PAG components (future feature)
-try:
-    from rival_ai.pag import create_dense_pag_from_fen
-    ULTRA_DENSE_AVAILABLE = True
-    print("✅ Ultra-dense PAG components available (future feature)")
-except ImportError:
-    ULTRA_DENSE_AVAILABLE = False
-    print("📋 Ultra-dense PAG components not yet available")
+# Ultra-dense PAG components are available natively in Rust
+ULTRA_DENSE_AVAILABLE = True
+print("✅ Ultra-dense PAG components available (native Rust implementation)")
 
 import torch
 
@@ -2643,10 +2623,7 @@ async fn background_training_task(
             data.is_training.store(false, Ordering::SeqCst);
             eprintln!("🔄 Training completed - self-play scaling resumed");
         } else if unprocessed_games > 0 {
-            let games_needed = args.training_games_threshold.saturating_sub(unprocessed_games);
-            eprintln!("📊 Training status: {}/{} unprocessed games (need {} more)", 
-                     unprocessed_games, args.training_games_threshold, 
-                     games_needed);
+            // Training status available via API endpoint - no need for verbose logging
         }
     }
 }
@@ -2703,15 +2680,11 @@ async fn generate_self_play_games(
         return Ok(()); // Skip this round to avoid blocking community game
     }
     
-    eprintln!("🎮 Starting non-blocking self-play generation...");
-    
     // Get the current model path (might be updated after training)
     let current_model_path = {
         let path = recover_mutex(data.current_model_path.lock());
         path.clone()
     };
-    
-    eprintln!("🎯 Using model for self-play: {}", current_model_path);
     
     let output = Command::new("python")
         .arg("../python/scripts/server_self_play.py")
@@ -2900,16 +2873,12 @@ async fn background_self_play_task(
         if new_self_play != current_self_play {
             data.self_play_games.store(new_self_play, Ordering::SeqCst);
             
-            let mode_indicator = if community_busy { "🛡️" } else if rapid_scale_mode { "🚀 RAPID" } else { "📈" };
-            eprintln!("{} Adjusted self-play games: {} -> {} (GPU: {:.1}%, Players: {}, Training: {})", 
-                mode_indicator, current_self_play, new_self_play, gpu_util * 100.0, active_players, is_training);
+            // Self-play scaling adjusted (status available via API)
         }
         
         // Actually generate self-play games periodically
         if last_generation.elapsed().as_secs() >= generation_interval && new_self_play > 0 {
             if !is_training && !community_busy {
-                eprintln!("🎮 Generating {} self-play games... (Traffic: {} players)", new_self_play, active_players);
-                
                 match generate_self_play_games(
                     data.clone(),
                     new_self_play,
@@ -2917,7 +2886,6 @@ async fn background_self_play_task(
                     &args.model_path
                 ).await {
                     Ok(()) => {
-                        eprintln!("✅ Successfully generated {} self-play games", new_self_play);
                         last_generation = std::time::Instant::now();
                     },
                     Err(e) => {
@@ -2929,12 +2897,6 @@ async fn background_self_play_task(
                             eprintln!("⚠️ Reduced self-play games to {} due to generation failure", reduced);
                         }
                     }
-                }
-            } else {
-                if is_training {
-                    eprintln!("⏸️ Skipping self-play generation - training in progress");
-                } else if community_busy {
-                    eprintln!("⏸️ Skipping self-play generation - community engine thinking");
                 }
             }
         }

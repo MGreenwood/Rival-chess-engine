@@ -21,7 +21,7 @@ class LossConfig:
     graph_weight: float = 0.2
     king_safety_weight: float = 0.15
     center_control_weight: float = 0.15
-    material_balance_weight: float = 0.1
+    material_balance_weight: float = 2.0  # 🎯 CRITICAL: Increased from 0.1 to 2.0 for tactical learning!
     piece_coordination_weight: float = 0.1
     attack_pattern_weight: float = 0.1
 
@@ -43,9 +43,9 @@ class PolicyValueLoss(nn.Module):
         policy_weight: float = 1.0,
         value_weight: float = 1.0,
         entropy_weight: float = 0.01,
-        repetition_penalty_weight: float = 1.0,  # Increased from 0.4 to 1.0
-        forward_progress_weight: float = 0.2,
-        draw_penalty_weight: float = 0.3,
+        repetition_penalty_weight: float = 2.0,  # Increased from 1.0 to 2.0 - stronger anti-repetition
+        forward_progress_weight: float = 0.5,  # Increased from 0.2 - encourage active play
+        draw_penalty_weight: float = 0.8,  # Increased from 0.3 - stronger draw penalty
         teacher_model: Optional[nn.Module] = None,
         temperature: float = 1.0,
         l2_weight: float = 1e-4

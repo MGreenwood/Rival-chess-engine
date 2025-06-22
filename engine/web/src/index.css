@@ -38,7 +38,8 @@
 }
 
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  --font-family: 'Poppins', system-ui, sans-serif;
+  font-family: var(--font-family);
   line-height: 1.5;
   font-weight: 400;
 
@@ -49,6 +50,17 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* Font override classes - can be applied to body or html */
+.font-inter { font-family: 'Inter', system-ui, sans-serif !important; }
+.font-space { font-family: 'Space Grotesk', system-ui, sans-serif !important; }
+.font-manrope { font-family: 'Manrope', system-ui, sans-serif !important; }
+.font-poppins { font-family: 'Poppins', system-ui, sans-serif !important; }
+.font-nunito { font-family: 'Nunito', system-ui, sans-serif !important; }
+.font-source { font-family: 'Source Sans 3', system-ui, sans-serif !important; }
+.font-roboto { font-family: 'Roboto', system-ui, sans-serif !important; }
+.font-ibm { font-family: 'IBM Plex Sans', system-ui, sans-serif !important; }
+.font-system { font-family: system-ui, Avenir, Helvetica, Arial, sans-serif !important; }
 
 a {
   font-weight: 500;

@@ -91,8 +91,8 @@ class SelfPlayConfig:
 class TrainingConfig:
     """Configuration for model training."""
     num_epochs: int = 100
-    batch_size: int = 64
-    learning_rate: float = 0.001
+    batch_size: int = 128  # Increased from 64 for better gradient estimates
+    learning_rate: float = 0.0003  # Reduced from 0.001 for more stable training
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     save_interval: int = 5
@@ -113,12 +113,33 @@ class TrainingConfig:
     early_stopping_patience: int = 10
     early_stopping_min_delta: float = 1e-4
     
-    # Loss function configuration
+    # Loss function configuration - Optimized for tactical learning
     use_improved_loss: bool = True  # Use improved loss function
+    use_pag_tactical_loss: bool = True  # Use ultra-dense PAG tactical loss for preventing blunders
     policy_weight: float = 1.0
-    value_weight: float = 0.5  # Reduced value weight
+    value_weight: float = 1.0  # Restored to 1.0 from 0.5 - position evaluation is critical
     entropy_weight: float = 0.01
     l2_weight: float = 1e-4
+    
+    # PAG Tactical Loss Configuration - CRITICAL for preventing basic blunders
+    pag_tactical_config: dict = None  # Will be set in __post_init__
+    
+    def __post_init__(self):
+        """Set default PAG tactical configuration."""
+        if self.pag_tactical_config is None:
+            self.pag_tactical_config = {
+                'vulnerability_weight': 8.0,        # CRITICAL: Heavy penalty for hanging pieces  
+                'motif_awareness_weight': 4.0,      # Strong tactical pattern recognition
+                'threat_generation_weight': 3.0,    # Reward threat creation
+                'material_protection_weight': 6.0,  # Protect valuable pieces strongly
+                'pin_exploitation_weight': 3.5,     # Exploit pins/skewers
+                'fork_creation_weight': 3.0,        # Create forks
+                'discovery_weight': 2.5,            # Discovered attacks
+                'defensive_coordination_weight': 3.0, # Coordinate defense
+                'tactical_positional_balance': 0.8, # 80% tactical focus (vs 20% positional)
+                'endgame_tactical_boost': 2.0,      # Double tactical precision in endgame
+                'progressive_difficulty': True,     # Gradually increase complexity
+            }
 
 @dataclass
 class ModelConfig:

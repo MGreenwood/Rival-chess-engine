@@ -82,15 +82,25 @@ class UCIModelWrapper:
             
             py.run(model_code, None, None)?;
             
-            // Get model path from command line args or use default
+            // Get model path from command line args or use fresh model
             let args: Vec<String> = env::args().collect();
-            let model_path = if args.len() > 1 {
-                args[1].clone()
+            let model_path = if args.len() > 1 && args[1] != "none" && args[1] != "new" && args[1] != "fresh" {
+                Some(args[1].clone())
             } else {
-                "../python/experiments/rival_ai_v1_Alice/run_20250617_221622/checkpoints/best_model.pt".to_string()
+                // Check if latest model exists, otherwise use fresh model
+                let latest_model = "../models/latest_trained_model.pt";
+                if std::path::Path::new(latest_model).exists() {
+                    Some(latest_model.to_string())
+                } else {
+                    None // Use fresh/random model
+                }
             };
             
-            let model_wrapper = py.eval(&format!("UCIModelWrapper('{}')", model_path), None, None)?;
+            let model_wrapper = if let Some(path) = model_path {
+                py.eval(&format!("UCIModelWrapper('{}')", path), None, None)?
+            } else {
+                py.eval("UCIModelWrapper(None)", None, None)?
+            };
             Ok(ModelBridge::new(model_wrapper.to_object(py), Some("cuda".to_string())))
         })?;
 
@@ -130,7 +140,7 @@ class UCIModelWrapper:
         println!("option name MCTS_Simulations type spin default 1000 min 100 max 10000");
         println!("option name Training_Mode type check default true");
         println!("option name Collect_Data type check default true");
-        println!("option name Neural_Model_Path type string default ../python/experiments/rival_ai_v1_Alice/run_20250617_221622/checkpoints/best_model.pt");
+        println!("option name Neural_Model_Path type string default ../models/latest_trained_model.pt");
         println!("option name Clear Hash type button");
     }
 

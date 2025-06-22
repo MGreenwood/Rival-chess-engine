@@ -1,7 +1,6 @@
 import React from 'react';
 import { Dialog, Transition } from '@headlessui/react';
 import { useTheme } from '../hooks/useTheme';
-import useStore from '../store/store';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -17,19 +16,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose })
     getThemeColor
   } = useTheme();
 
-  const { gameActions } = useStore();
-  const { startNewGame } = gameActions;
 
-  const [temperature, setTemperature] = React.useState(1.0);
-  const [strength, setStrength] = React.useState(1.0);
-
-  const handleStartNewGame = async () => {
-    try {
-      await startNewGame('single');
-    } catch (error) {
-      console.error('Failed to start new game:', error);
-    }
-  };
 
   return (
     <Transition appear show={isOpen} as={React.Fragment}>
@@ -97,58 +84,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose })
                     </button>
                   </div>
 
-                  {/* Engine Settings */}
-                  <div className="mb-4">
-                    <h4 className="text-md font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Engine Settings
-                    </h4>
-                    
-                    {/* Temperature Slider */}
-                    <div className="mb-3">
-                      <label className="block text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
-                        Temperature: {temperature.toFixed(2)}
-                      </label>
-                      <input
-                        type="range"
-                        min="0.01"
-                        max="2"
-                        step="0.01"
-                        value={temperature}
-                        onChange={(e) => setTemperature(parseFloat(e.target.value))}
-                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
-                      />
-                      <span className="text-xs text-gray-500 dark:text-gray-400">
-                        Higher = more random moves
-                      </span>
-                    </div>
 
-                    {/* Strength Slider */}
-                    <div className="mb-3">
-                      <label className="block text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
-                        Strength: {(strength * 100).toFixed(0)}%
-                      </label>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={strength}
-                        onChange={(e) => setStrength(parseFloat(e.target.value))}
-                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
-                      />
-                      <span className="text-xs text-gray-500 dark:text-gray-400">
-                        Lower = more mistakes
-                      </span>
-                    </div>
-
-                    {/* New Game Button */}
-                    <button
-                      onClick={handleStartNewGame}
-                      className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-                    >
-                      Start New Game
-                    </button>
-                  </div>
 
                   {/* Board Settings */}
                   <div>

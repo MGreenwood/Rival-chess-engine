@@ -5,6 +5,7 @@ Trainer module for training the chess model.
 import os
 import time
 import logging
+import json
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -157,8 +158,12 @@ class Trainer:
             eta_min=self.config.learning_rate * 0.1
         )
         
-        # Initialize loss function - Use improved loss if configured
-        if self.config.use_improved_loss:
+        # Initialize loss function - Use PAG tactical loss if configured
+        if self.config.use_pag_tactical_loss:
+            from .pag_tactical_loss import PAGTacticalLoss
+            self.criterion = PAGTacticalLoss(**self.config.pag_tactical_config)
+            logger.info("Using PAG Tactical Loss for preventing blunders")
+        elif self.config.use_improved_loss:
             self.criterion = ImprovedPolicyValueLoss(
                 policy_weight=self.config.policy_weight,
                 value_weight=self.config.value_weight,
@@ -301,15 +306,73 @@ class Trainer:
                     
                     # Create dataset and dataloader
                     try:
-                        dataset = ChessDataset.from_game_records(games)
-                        dataloader = create_dataloader(
-                            dataset,
-                            batch_size=self.config.batch_size,
-                            shuffle=True,
-                            num_workers=self.config.num_workers,
-                            pin_memory=True
-                        )
-                        logger.info(f"Created dataset with {len(dataset)} positions")
+                        if self.config.use_pag_tactical_loss:
+                            # Use enhanced dataset for PAG tactical loss
+                            from rival_ai.data.enhanced_dataset import create_enhanced_dataloader
+                            
+                            # Save games temporarily for enhanced dataset
+                            temp_data_dir = Path(self.config.experiment_dir) / 'temp_training_data'
+                            temp_data_dir.mkdir(exist_ok=True)
+                            
+                            # Convert games to JSON format for enhanced dataset
+                            temp_positions = []
+                            for game in games:
+                                # Extract training data from GameRecord structure
+                                if hasattr(game, 'states') and hasattr(game, 'policies') and hasattr(game, 'values'):
+                                    for i in range(len(game.states)):
+                                        if i < len(game.policies) and i < len(game.values):
+                                            # Convert policy tensor to list if needed
+                                            policy = game.policies[i]
+                                            if hasattr(policy, 'tolist'):
+                                                policy = policy.tolist()
+                                            elif hasattr(policy, 'numpy'):
+                                                policy = policy.numpy().tolist()
+                                            else:
+                                                policy = [0.0] * 4096  # Fallback
+                                            
+                                            # Convert value to float if needed
+                                            value = game.values[i]
+                                            if hasattr(value, 'item'):
+                                                value = value.item()
+                                            elif hasattr(value, 'numpy'):
+                                                value = value.numpy().item()
+                                            else:
+                                                value = float(value)
+                                            
+                                            temp_positions.append({
+                                                'fen': game.states[i].fen(),
+                                                'policy': policy,
+                                                'value': value
+                                            })
+                                else:
+                                    logger.warning(f"Skipping game with unexpected structure: {type(game)}")
+                            
+                            # Save to temporary JSON file
+                            temp_file = temp_data_dir / f'epoch_{epoch}_data.json'
+                            with open(temp_file, 'w') as f:
+                                json.dump(temp_positions, f)
+                            
+                            # Create enhanced dataloader
+                            dataloader = create_enhanced_dataloader(
+                                data_dir=temp_data_dir,
+                                batch_size=self.config.batch_size,
+                                shuffle=True,
+                                num_workers=0,  # Use 0 for Windows compatibility with enhanced dataset
+                                pin_memory=True,
+                                extract_rust_pag=True
+                            )
+                            logger.info(f"Created enhanced dataset with PAG features: {len(temp_positions)} positions")
+                        else:
+                            # Use standard dataset
+                            dataset = ChessDataset.from_game_records(games)
+                            dataloader = create_dataloader(
+                                dataset,
+                                batch_size=self.config.batch_size,
+                                shuffle=True,
+                                num_workers=self.config.num_workers,
+                                pin_memory=True
+                            )
+                            logger.info(f"Created standard dataset with {len(dataset)} positions")
                     except Exception as e:
                         logger.error(f"Error creating dataset/dataloader: {str(e)}")
                         logger.error(f"Error type: {type(e)}")
@@ -333,6 +396,10 @@ class Trainer:
                     
                     # Update learning rate
                     self.scheduler.step()
+                    
+                    # Update PAG tactical loss epoch for progressive difficulty
+                    if self.config.use_pag_tactical_loss and hasattr(self.criterion, 'update_epoch'):
+                        self.criterion.update_epoch(epoch)
                     
                     # Save checkpoint
                     if (epoch + 1) % self.config.save_interval == 0:
@@ -416,13 +483,39 @@ class Trainer:
                     
                     # Calculate loss
                     try:
-                        loss, components = self.criterion(
-                            policy_pred,
-                            value_pred,
-                            policy_target,
-                            value_target,
-                            self.model
-                        )
+                        if self.config.use_pag_tactical_loss:
+                            # Extract PAG features for tactical loss
+                            pag_features = batch.get('pag_features')
+                            if pag_features is not None:
+                                pag_features = pag_features.to(self.device)
+                                loss_dict = self.criterion(
+                                    policy_pred,
+                                    value_pred,
+                                    policy_target,
+                                    value_target,
+                                    pag_features
+                                )
+                                loss = loss_dict['total_loss']
+                                components = {k: v.item() if hasattr(v, 'item') else v 
+                                            for k, v in loss_dict.items() if k != 'total_loss'}
+                            else:
+                                # Fallback to regular loss if PAG features not available
+                                logger.warning("PAG features not available, falling back to regular loss")
+                                loss, components = self.criterion(
+                                    policy_pred,
+                                    value_pred,
+                                    policy_target,
+                                    value_target,
+                                    self.model
+                                )
+                        else:
+                            loss, components = self.criterion(
+                                policy_pred,
+                                value_pred,
+                                policy_target,
+                                value_target,
+                                self.model
+                            )
                     except Exception as e:
                         logger.error(f"Error calculating loss for batch {batch_idx}: {str(e)}")
                         logger.error(f"Shapes: policy_pred={policy_pred.shape}, value_pred={value_pred.shape}")
