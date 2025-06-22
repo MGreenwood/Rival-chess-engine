@@ -198,6 +198,7 @@ struct Claims {
 
 #[derive(Clone)]
 pub struct CommunityGame {
+    game_id: String,  // Persistent game ID
     board: ChessBoard,
     move_history: Vec<String>,
     votes: HashMap<String, HashSet<String>>,  // move -> set of voter IDs
@@ -211,6 +212,7 @@ pub struct CommunityGame {
 impl CommunityGame {
     pub fn new() -> Self {
         Self {
+            game_id: uuid::Uuid::new_v4().to_string(),  // Generate game ID once
             board: ChessBoard::default(),
             move_history: Vec::new(),
             votes: HashMap::new(),
@@ -417,7 +419,7 @@ impl CommunityGame {
                 }
             }
 
-            // Save game state
+            // Save game state (for persistence/recovery)
             self.save_game_state(game_storage);
         }
 
@@ -472,7 +474,7 @@ impl CommunityGame {
     fn save_game_state(&self, game_storage: &GameStorage) {
         let game_state = StorageGameState {
             metadata: GameMetadata {
-                game_id: uuid::Uuid::new_v4().to_string(),
+                game_id: self.game_id.clone(),  // Use persistent game ID
                 mode: GameMode::Community,
                 created_at: Utc::now(),
                 last_move_at: Utc::now(),
@@ -520,6 +522,10 @@ pub struct AppState {
     pub voter_sessions: Arc<Mutex<HashMap<String, VoterSession>>>,
     pub jwt_secret: String,
     pub current_model_path: Arc<Mutex<String>>,  // Track current model path for self-play
+    // Add cached stats - initialized once on startup, then just incremented
+    pub cached_stats: Arc<Mutex<ServerStats>>,
+    // In-memory queue of last 10 completed games (much faster than disk I/O)
+    pub recent_completed_games: Arc<Mutex<VecDeque<GameMetadata>>>,
 }
 
 impl AppState {
@@ -806,6 +812,9 @@ async fn make_move(
             }));
         }
         
+        // Update stats cache immediately (no file I/O needed!)
+        update_stats_cache_for_completed_game(&data, &game_state.metadata);
+        
         // Remove from active games
         {
             let mut active_games = recover_mutex(data.active_games.lock());
@@ -851,6 +860,9 @@ async fn make_move(
                     "error_message": format!("Failed to save game: {}", e)
                 }));
             }
+            
+            // Update stats cache immediately (no file I/O needed!)
+            update_stats_cache_for_completed_game(&data, &game_state.metadata);
             
             // Remove from active games
             {
@@ -1584,64 +1596,51 @@ async fn list_games(data: web::Data<AppState>) -> impl Responder {
 }
 
 async fn get_recent_games(data: web::Data<AppState>) -> impl Responder {
-    match data.game_storage.list_games(None) {
-        Ok(games) => {
-            let mut recent_games = Vec::new();
-            
-            for metadata in games {
-                // Convert GameStatus to string and mode to string for frontend
-                let mode_str = match metadata.mode {
-                    GameMode::SinglePlayer => "single",
-                    GameMode::Community => "community", 
-                    GameMode::UCI => "single", // UCI games show as single-player in UI
-                };
-                
-                let status_str = match metadata.status {
-                    GameStatus::Active => "active",
-                    GameStatus::Waiting => "waiting",
-                    GameStatus::WhiteWins => "white_wins",
-                    GameStatus::BlackWins => "black_wins",
-                    GameStatus::DrawStalemate => "draw_stalemate", 
-                    GameStatus::DrawInsufficientMaterial => "draw_insufficient_material",
-                    GameStatus::DrawRepetition => "draw_repetition",
-                    GameStatus::DrawFiftyMoves => "draw_fifty_moves",
-                };
-                
-                // Use total_moves from metadata (already available, no need to load full game)
-                let total_moves = metadata.total_moves;
-                
-                recent_games.push(json!({
-                    "game_id": metadata.game_id,
-                    "mode": mode_str,
-                    "created_at": metadata.created_at.to_rfc3339(),
-                    "last_move_at": metadata.last_move_at.to_rfc3339(),
-                    "status": status_str,
-                    "total_moves": total_moves,
-                    "player_color": metadata.player_color,
-                    "player_name": metadata.player_name,
-                    "engine_version": metadata.engine_version,
-                }));
-            }
-            
-            // Sort by last_move_at descending (most recent first)
-            recent_games.sort_by(|a, b| {
-                let a_time = a["last_move_at"].as_str().unwrap_or("");
-                let b_time = b["last_move_at"].as_str().unwrap_or("");
-                b_time.cmp(a_time)
-            });
-            
-            // Limit to last 50 games for performance
-            recent_games.truncate(50);
-            
-            HttpResponse::Ok().json(recent_games)
-        }
-        Err(e) => HttpResponse::InternalServerError().json(json!({
-            "error": format!("Failed to get recent games: {}", e)
-        }))
+    // Serve recent completed games from memory queue (much faster than disk I/O!)
+    let recent_games = {
+        let queue = recover_mutex(data.recent_completed_games.lock());
+        queue.iter().cloned().collect::<Vec<_>>()
+    };
+    
+    let mut response_games = Vec::new();
+    
+    for metadata in recent_games {
+        // Convert GameStatus to string and mode to string for frontend
+        let mode_str = match metadata.mode {
+            GameMode::SinglePlayer => "single",
+            GameMode::Community => "community", 
+            GameMode::UCI => "single", // UCI games show as single-player in UI
+        };
+        
+        let status_str = match metadata.status {
+            GameStatus::Active => "active",
+            GameStatus::Waiting => "waiting",
+            GameStatus::WhiteWins => "white_wins",
+            GameStatus::BlackWins => "black_wins",
+            GameStatus::DrawStalemate => "draw_stalemate", 
+            GameStatus::DrawInsufficientMaterial => "draw_insufficient_material",
+            GameStatus::DrawRepetition => "draw_repetition",
+            GameStatus::DrawFiftyMoves => "draw_fifty_moves",
+        };
+        
+        response_games.push(json!({
+            "game_id": metadata.game_id,
+            "mode": mode_str,
+            "created_at": metadata.created_at.to_rfc3339(),
+            "last_move_at": metadata.last_move_at.to_rfc3339(),
+            "status": status_str,
+            "total_moves": metadata.total_moves,
+            "player_color": metadata.player_color,
+            "player_name": metadata.player_name,
+            "engine_version": metadata.engine_version,
+        }));
     }
+    
+    // Games are already in newest-first order from the queue
+    HttpResponse::Ok().json(response_games)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ServerModelStats {
     total_games: usize,
     wins: usize,
@@ -1654,7 +1653,7 @@ struct ServerModelStats {
     engine_versions: Vec<EngineVersionInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct EngineVersionInfo {
     version: String,
     games: usize,
@@ -1666,7 +1665,7 @@ struct EngineVersionInfo {
     last_game: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ServerStats {
     single_player_model: ServerModelStats,
     community_model: ServerModelStats,
@@ -1676,8 +1675,11 @@ struct ServerStats {
     total_games_count: usize,
 }
 
-async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
-    // Load persistent stats (survives game archival)
+// Initialize stats cache by reading all games once on startup
+async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Result<(), String> {
+    println!("🚀 Initializing stats cache by reading game files...");
+    
+    // Load persistent stats (already cached in database file)
     let persistent_stats = match data.game_storage.load_persistent_stats() {
         Ok(stats) => stats,
         Err(e) => {
@@ -1686,10 +1688,15 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
         }
     };
     
-    // Also load current unarchived games for recent activity
-    let current_games = data.game_storage.list_games(None).unwrap_or_default();
+    // Read all unarchived game files once to get metadata (this is the expensive part)
+    let current_games = data.game_storage.list_games(None)
+        .map_err(|e| format!("Failed to list games during cache init: {}", e))?;
     
-    // Combine persistent stats with current games to get complete picture
+    println!("📊 Cache init: Found {} persistent games, {} unarchived games", 
+        persistent_stats.single_player.total_games + persistent_stats.community.total_games,
+        current_games.len());
+    
+    // Build stats from persistent data + current unarchived games
     let mut single_player_stats = ServerModelStats {
         total_games: persistent_stats.single_player.total_games,
         wins: persistent_stats.single_player.wins,
@@ -1714,7 +1721,7 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
         engine_versions: Vec::new(),
     };
     
-    // Add any recent unarchived games to the stats
+    // Add unarchived games to the stats
     for metadata in &current_games {
         let stats = match metadata.mode {
             GameMode::SinglePlayer => &mut single_player_stats,
@@ -1796,7 +1803,8 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
         });
     }
     
-    // Get GPU utilization
+    // Get GPU utilization (this is still dynamic)
+    let mut gpu_util = 0.0;
     Python::with_gil(|py| {
         if let Ok(torch) = PyModule::import(py, "torch") {
             if let Ok(true) = torch.getattr("cuda")?.call_method0("is_available")?.extract() {
@@ -1804,9 +1812,7 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
                     let _ = nvml.call_method0("nvmlInit");
                     if let Ok(handle) = nvml.call_method1("nvmlDeviceGetHandleByIndex", (0,)) {
                         if let Ok(util) = handle.call_method0("nvmlDeviceGetUtilizationRates") {
-                            let gpu_util = util.getattr("gpu")?.extract::<f32>()? / 100.0;
-                            single_player_stats.gpu_utilization = gpu_util;
-                            community_stats.gpu_utilization = gpu_util;
+                            gpu_util = util.getattr("gpu")?.extract::<f32>()? / 100.0;
                         }
                     }
                 }
@@ -1814,9 +1820,11 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
         }
         Ok::<_, PyErr>(())
     }).ok();
-
+    
+    single_player_stats.gpu_utilization = gpu_util;
+    community_stats.gpu_utilization = gpu_util;
+    
     // Get unprocessed games count for training progress
-    let args = Args::parse();
     let unprocessed_games = match count_unprocessed_games(&args.games_dir).await {
         Ok(count) => count,
         Err(_) => 0, // Fall back to 0 if counting fails
@@ -1827,15 +1835,140 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
     } else {
         args.training_games_threshold - unprocessed_games
     };
-
-    HttpResponse::Ok().json(ServerStats {
-        single_player_model: single_player_stats,
-        community_model: community_stats,
+    
+    // Store in cache
+    let cached_stats = ServerStats {
+        single_player_model: single_player_stats.clone(),
+        community_model: community_stats.clone(),
         active_players: data.active_players.load(Ordering::SeqCst),
         self_play_games: data.self_play_games.load(Ordering::SeqCst),
         unprocessed_games_count: unprocessed_games,
         total_games_count: current_games.len(), // This is now just unarchived games
-    })
+    };
+    
+    {
+        let mut cache = recover_mutex(data.cached_stats.lock());
+        *cache = cached_stats;
+    }
+    
+    // Initialize recent completed games queue with up to 10 most recent completed games
+    {
+        let mut recent_queue = recover_mutex(data.recent_completed_games.lock());
+        let mut completed_games: Vec<_> = current_games.into_iter()
+            .filter(|g| matches!(g.status, 
+                GameStatus::WhiteWins | GameStatus::BlackWins | 
+                GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+                GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves))
+            .collect();
+        
+        // Sort by last_move_at descending (newest first)
+        completed_games.sort_by(|a, b| b.last_move_at.cmp(&a.last_move_at));
+        
+        // Take up to 10 most recent
+        for game in completed_games.into_iter().take(10) {
+            recent_queue.push_back(game);
+        }
+        
+        println!("📋 Recent games queue initialized with {} completed games", recent_queue.len());
+    }
+    
+    println!("✅ Stats cache initialized: {} single-player games, {} community games", 
+        persistent_stats.single_player.total_games + 
+            single_player_stats.total_games - persistent_stats.single_player.total_games,
+        persistent_stats.community.total_games + 
+            community_stats.total_games - persistent_stats.community.total_games);
+    
+    Ok(())
+}
+
+// Function to update cache when a game completes (NO FILE I/O!)
+fn update_stats_cache_for_completed_game(data: &web::Data<AppState>, metadata: &GameMetadata) {
+    let mut cache = recover_mutex(data.cached_stats.lock());
+    
+    let stats = match metadata.mode {
+        GameMode::SinglePlayer => &mut cache.single_player_model,
+        GameMode::Community => &mut cache.community_model,
+        GameMode::UCI => &mut cache.single_player_model, // UCI games count as single-player
+    };
+    
+    // Only update for completed games
+    if matches!(metadata.status, 
+        GameStatus::WhiteWins | GameStatus::BlackWins | 
+        GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+        GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves) {
+        
+        stats.total_games += 1;
+        match metadata.status {
+            GameStatus::WhiteWins => {
+                if metadata.player_color == "white" {
+                    stats.wins += 1;
+                } else {
+                    stats.losses += 1;
+                }
+            },
+            GameStatus::BlackWins => {
+                if metadata.player_color == "black" {
+                    stats.wins += 1;
+                } else {
+                    stats.losses += 1;
+                }
+            },
+            _ => stats.draws += 1,
+        }
+        
+        // Recalculate win rate
+        if stats.total_games > 0 {
+            stats.win_rate = (stats.wins as f32 / stats.total_games as f32) * 100.0;
+        }
+        
+        // Add to recent completed games queue (max 10)
+        {
+            let mut recent_games = recover_mutex(data.recent_completed_games.lock());
+            recent_games.push_front(metadata.clone());
+            if recent_games.len() > 10 {
+                recent_games.pop_back(); // Remove oldest game
+            }
+        }
+        
+        println!("📊 Cache updated: {} now has {} total games (W:{} L:{} D:{}, {:.1}% win rate)", 
+            match metadata.mode {
+                GameMode::SinglePlayer | GameMode::UCI => "Single-player",
+                GameMode::Community => "Community",
+            },
+            stats.total_games, stats.wins, stats.losses, stats.draws, stats.win_rate);
+    }
+}
+
+async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
+    // Just return the cached stats - no file I/O!
+    let mut cache = recover_mutex(data.cached_stats.lock());
+    
+    // Update dynamic values that can change frequently
+    cache.active_players = data.active_players.load(Ordering::SeqCst);
+    cache.self_play_games = data.self_play_games.load(Ordering::SeqCst);
+    cache.single_player_model.is_training = data.is_training.load(Ordering::SeqCst);
+    cache.community_model.is_training = data.is_training.load(Ordering::SeqCst);
+    
+    // Update GPU utilization if needed (this is the only "expensive" operation left)
+    Python::with_gil(|py| {
+        if let Ok(torch) = PyModule::import(py, "torch") {
+            if let Ok(true) = torch.getattr("cuda")?.call_method0("is_available")?.extract() {
+                if let Ok(nvml) = PyModule::import(py, "pynvml") {
+                    let _ = nvml.call_method0("nvmlInit");
+                    if let Ok(handle) = nvml.call_method1("nvmlDeviceGetHandleByIndex", (0,)) {
+                        if let Ok(util) = handle.call_method0("nvmlDeviceGetUtilizationRates") {
+                            let gpu_util = util.getattr("gpu")?.extract::<f32>()? / 100.0;
+                            cache.single_player_model.gpu_utilization = gpu_util;
+                            cache.community_model.gpu_utilization = gpu_util;
+                        }
+                    }
+                }
+            }
+        }
+        Ok::<_, PyErr>(())
+    }).ok();
+    
+    HttpResponse::Ok().json((*cache).clone())
 }
 
 #[derive(Serialize)]
@@ -2082,6 +2215,37 @@ class UltraDenseFallbackModel:
             voter_sessions: Arc::new(Mutex::new(HashMap::new())),
             jwt_secret: jwt_secret.clone(),
             current_model_path: Arc::new(Mutex::new(args.model_path.clone())),
+            // Add cached stats - initialized once on startup, then just incremented
+            cached_stats: Arc::new(Mutex::new(ServerStats {
+                single_player_model: ServerModelStats {
+                    total_games: 0,
+                    wins: 0,
+                    losses: 0,
+                    draws: 0,
+                    win_rate: 0.0,
+                    games_until_training: 0,
+                    is_training: false,
+                    gpu_utilization: 0.0,
+                    engine_versions: Vec::new(),
+                },
+                community_model: ServerModelStats {
+                    total_games: 0,
+                    wins: 0,
+                    losses: 0,
+                    draws: 0,
+                    win_rate: 0.0,
+                    games_until_training: 0,
+                    is_training: false,
+                    gpu_utilization: 0.0,
+                    engine_versions: Vec::new(),
+                },
+                active_players: 0,
+                self_play_games: 0,
+                unprocessed_games_count: 0,
+                total_games_count: 0,
+            })),
+            // Initialize empty queue for recent completed games (max 10)
+            recent_completed_games: Arc::new(Mutex::new(VecDeque::with_capacity(10))),
         });
         
         // Add cleanup task
@@ -2131,55 +2295,6 @@ class UltraDenseFallbackModel:
             });
         }
         
-        // Load and display initial stats
-        println!("Loading game statistics...");
-        
-        // Initialize persistent stats database if it doesn't exist
-        match game_storage.load_persistent_stats() {
-            Ok(stats) => {
-                let total_persistent_games = stats.single_player.total_games + stats.community.total_games;
-                if total_persistent_games > 0 {
-                    println!("📊 Loaded persistent stats: {} total games tracked", total_persistent_games);
-                    println!("   Single-player: {} games (W:{} L:{} D:{})", 
-                             stats.single_player.total_games, 
-                             stats.single_player.wins,
-                             stats.single_player.losses, 
-                             stats.single_player.draws);
-                    println!("   Community: {} games (W:{} L:{} D:{})", 
-                             stats.community.total_games, 
-                             stats.community.wins,
-                             stats.community.losses, 
-                             stats.community.draws);
-                } else {
-                    println!("📊 Initialized new persistent stats database");
-                }
-            },
-            Err(e) => {
-                println!("⚠️ Warning: Could not load persistent stats: {}", e);
-                println!("📊 Will create new stats database");
-            }
-        }
-        
-        // Load current unarchived games  
-        match game_storage.list_games(None) {
-            Ok(games) => {
-                let total_games = games.len();
-                let single_player_games = games.iter().filter(|g| matches!(g.mode, GameMode::SinglePlayer)).count();
-                let community_games = games.iter().filter(|g| matches!(g.mode, GameMode::Community)).count();
-                let uci_games = games.iter().filter(|g| matches!(g.mode, GameMode::UCI)).count();
-                
-                println!("📁 Found {} unarchived games ({} single-player, {} community, {} UCI)", 
-                    total_games, single_player_games, community_games, uci_games);
-                
-                if total_games == 0 {
-                    println!("📁 No unarchived games found - this is normal after game archival");
-                }
-            }
-            Err(e) => {
-                println!("⚠️ Warning: Could not load current games: {}", e);
-            }
-        }
-        
         println!("💾 Game persistence: Stats survive server restarts, games archived after training");
         println!("Games directory: {}", args.games_dir);
 
@@ -2203,42 +2318,56 @@ class UltraDenseFallbackModel:
         println!("   🔄 Scaling: Aggressive when 0 players, conservative with traffic");
         println!("   🧠 All games use ultra-dense master-level analysis");
         
-        HttpServer::new(move || {
-            App::new()
-                .wrap(Logger::default())
-                .wrap(
-                    Cors::default()
-                        .allow_any_origin()
-                        .allow_any_method()
-                        .allow_any_header()
-                        .expose_headers(vec!["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"])
-                )
-                .app_data(app_state.clone())
-                .service(web::resource("/ws/{game_id}").route(web::get().to(ws_route)))
-                .service(web::resource("/game").route(web::get().to(get_game_state)))
-                .service(web::resource("/move/new").route(web::post().to(create_new_game)))
-                .service(web::resource("/move").route(web::post().to(make_move)))
-                .service(web::resource("/api/community/state").route(web::get().to(get_community_game_state)))
-                .service(web::resource("/api/community/vote").route(web::post().to(vote_move)))
-                .service(web::resource("/api/community/session").route(web::post().to(create_voter_session)))
-                .service(web::resource("/api/community/start").route(web::post().to(start_community_game)))
-                .service(web::resource("/api/community/start-voting").route(web::post().to(start_voting_round)))
-                .service(web::resource("/api/community/force-resolve").route(web::post().to(force_resolve_voting)))
-                .service(web::resource("/games").route(web::get().to(list_games)))
-                .service(web::resource("/recent-games").route(web::get().to(get_recent_games)))
-                .service(web::resource("/games/{id}").route(web::get().to(get_game)))
-                .service(web::resource("/stats").route(web::get().to(get_model_stats)))
-                .service(web::resource("/stats/refresh").route(web::post().to(refresh_stats)))
-                .service(web::resource("/leaderboard").route(web::get().to(get_leaderboard)))
-                .service(web::resource("/self-play-status").route(web::get().to(get_self_play_status)))
-        })
-        .bind((args.host.clone(), args.port))
-        .unwrap()
-        .run()
+        app_state
     });
 
+    // Initialize stats cache (read files once, then just use memory) - OUTSIDE the Python closure
+    println!("🚀 Initializing high-performance stats cache...");
+    match initialize_stats_cache(&server, &args).await {
+        Ok(()) => {
+            println!("✅ Stats cache initialized successfully");
+        }
+        Err(e) => {
+            println!("⚠️ Warning: Stats cache initialization failed: {}", e);
+            println!("📊 Will serve empty stats until games are completed");
+        }
+    }
+
+    let http_server = HttpServer::new(move || {
+        App::new()
+            .wrap(Logger::default())
+            .wrap(
+                Cors::default()
+                    .allow_any_origin()
+                    .allow_any_method()
+                    .allow_any_header()
+                    .expose_headers(vec!["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"])
+            )
+            .app_data(server.clone())
+            .service(web::resource("/ws/{game_id}").route(web::get().to(ws_route)))
+            .service(web::resource("/game").route(web::get().to(get_game_state)))
+            .service(web::resource("/move/new").route(web::post().to(create_new_game)))
+            .service(web::resource("/move").route(web::post().to(make_move)))
+            .service(web::resource("/api/community/state").route(web::get().to(get_community_game_state)))
+            .service(web::resource("/api/community/vote").route(web::post().to(vote_move)))
+            .service(web::resource("/api/community/session").route(web::post().to(create_voter_session)))
+            .service(web::resource("/api/community/start").route(web::post().to(start_community_game)))
+            .service(web::resource("/api/community/start-voting").route(web::post().to(start_voting_round)))
+            .service(web::resource("/api/community/force-resolve").route(web::post().to(force_resolve_voting)))
+            .service(web::resource("/games").route(web::get().to(list_games)))
+            .service(web::resource("/recent-games").route(web::get().to(get_recent_games)))
+            .service(web::resource("/games/{id}").route(web::get().to(get_game)))
+            .service(web::resource("/stats").route(web::get().to(get_model_stats)))
+            .service(web::resource("/stats/refresh").route(web::post().to(refresh_stats)))
+            .service(web::resource("/leaderboard").route(web::get().to(get_leaderboard)))
+            .service(web::resource("/self-play-status").route(web::get().to(get_self_play_status)))
+    })
+    .bind((args.host.clone(), args.port))
+    .unwrap()
+    .run();
+
     println!("Server started successfully");
-    server.await
+    http_server.await
 }
 
 // Add periodic cleanup for expired sessions
@@ -2267,12 +2396,12 @@ async fn check_and_process_expired_votes(data: web::Data<AppState>) {
             std::time::Duration::from_millis(15000), // 15 second timeout (longer than engine's 10s)
             async {
                 // Step 1: Process community move and set engine thinking flag
-                let (winning_move, needs_engine_move, board_for_engine) = {
+                let (_winning_move, needs_engine_move, board_for_engine) = {
                     let mut game = data.game.lock().unwrap();
                     
                     // Double-check conditions after acquiring lock
                     if !game.votes_started || game.is_voting_phase() || game.votes.is_empty() {
-                        return Ok(()); // Conditions changed, nothing to do
+                        return Ok::<(), String>(()); // Conditions changed, nothing to do
                     }
                     
                     let vote_count = game.votes.len();
@@ -2296,12 +2425,14 @@ async fn check_and_process_expired_votes(data: web::Data<AppState>) {
                                 };
                                 eprintln!("🏁 Game ended in checkmate after community move");
                                 game.save_game_state(&data.game_storage);
+                                update_stats_cache_for_community_game(&data, &game);
                                 return Ok(());
                             }
                             chess::BoardStatus::Stalemate => {
                                 game.status = GameStatus::DrawStalemate;
                                 eprintln!("🏁 Game ended in stalemate after community move");
                                 game.save_game_state(&data.game_storage);
+                                update_stats_cache_for_community_game(&data, &game);
                                 return Ok(());
                             }
                             _ => {} // Game continues
@@ -2329,7 +2460,7 @@ async fn check_and_process_expired_votes(data: web::Data<AppState>) {
                 if needs_engine_move {
                     let engine_move_result = {
                         // Only lock the engine, not the game
-                        let mut engine = data.community_engine.lock().unwrap();
+                        let engine = data.community_engine.lock().unwrap();
                         engine.get_best_move(board_for_engine)
                     };
                     
@@ -2360,16 +2491,19 @@ async fn check_and_process_expired_votes(data: web::Data<AppState>) {
                             } else {
                                 GameStatus::WhiteWins
                             };
-                            eprintln!("🏁 Game ended in checkmate after engine move");
-                        }
-                        chess::BoardStatus::Stalemate => {
-                            game.status = GameStatus::DrawStalemate;
-                            eprintln!("🏁 Game ended in stalemate after engine move");
-                        }
-                        _ => {} // Game continues
+                                                    eprintln!("🏁 Game ended in checkmate after engine move");
                     }
-                    
-                    game.save_game_state(&data.game_storage);
+                    chess::BoardStatus::Stalemate => {
+                        game.status = GameStatus::DrawStalemate;
+                        eprintln!("🏁 Game ended in stalemate after engine move");
+                    }
+                    _ => {} // Game continues
+                }
+                
+                game.save_game_state(&data.game_storage);
+                
+                // Update cache if game ended
+                update_stats_cache_for_community_game(&data, &game);
                 }
                 
                 Ok(())
@@ -3017,4 +3151,28 @@ async fn reload_engine_model(data: &web::Data<AppState>, new_model_path: &str) -
     })?;
     
     Ok(())
+}
+
+// Helper function to update cache when community games complete
+fn update_stats_cache_for_community_game(data: &web::Data<AppState>, game: &CommunityGame) {
+    // Only update cache if the game has actually ended
+    if matches!(game.status, 
+        GameStatus::WhiteWins | GameStatus::BlackWins | 
+        GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+        GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves) {
+        
+        let metadata = GameMetadata {
+            game_id: game.game_id.clone(), // Use persistent game ID
+            mode: GameMode::Community,
+            created_at: Utc::now(),
+            last_move_at: Utc::now(),
+            status: game.status.clone(),
+            total_moves: game.move_history.len(),
+            player_color: if game.player_is_white { "white".to_string() } else { "black".to_string() },
+            player_name: Some("Community".to_string()),
+            engine_version: "1.0.0".to_string(),
+        };
+        
+        update_stats_cache_for_completed_game(data, &metadata);
+    }
 }

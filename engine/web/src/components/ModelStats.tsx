@@ -1,6 +1,7 @@
-import React, { memo, useEffect } from 'react';
+import React, { memo, useEffect, useMemo } from 'react';
 import useStore from '../store/store';
 import { formatDistanceToNow, isValid } from 'date-fns';
+import DonationButton from './DonationButton';
 
 const ModelStats: React.FC = memo(() => {
   const { modelStats, recentGames, currentMode, uiActions } = useStore();
@@ -10,13 +11,48 @@ const ModelStats: React.FC = memo(() => {
     uiActions.loadStatsForMode(currentMode);
   }, [currentMode, uiActions]);
 
-  // Debug logging (temporary)
-  useEffect(() => {
-    console.log('ModelStats Debug:', {
-      currentMode,
-      recentGamesCount: recentGames.length,
-      firstFewGames: recentGames.slice(0, 3)
+  // Memoize filtered games to prevent excessive re-computation
+  const filteredGames = useMemo(() => {
+    console.log(`🎯 Filtering games for ${currentMode}:`, {
+      totalGames: recentGames.length,
+      currentMode
     });
+    
+    // Ensure recentGames is always an array to prevent "filter is not a function" errors
+    const completedGames = (Array.isArray(recentGames) ? recentGames : [])
+      .filter(game => {
+        // Filter by current mode (show single-player games for 'single' mode, community games for 'community' mode)
+        const gameMode = game.mode;
+        if (currentMode === 'single' && gameMode !== 'single') {
+          return false;
+        }
+        if (currentMode === 'community' && gameMode !== 'community') {
+          return false;
+        }
+        
+        try {
+          const date = new Date(game.last_move_at);
+          if (!isValid(date)) {
+            return false;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .sort((a, b) => {
+        try {
+          const dateA = new Date(a.last_move_at);
+          const dateB = new Date(b.last_move_at);
+          return dateB.getTime() - dateA.getTime();
+        } catch {
+          return 0;
+        }
+      })
+      .slice(0, 10);
+    
+    console.log(`✅ Filtered ${completedGames.length} games for ${currentMode}`);
+    return completedGames;
   }, [recentGames, currentMode]);
   
   if (!modelStats) {
@@ -41,56 +77,6 @@ const ModelStats: React.FC = memo(() => {
   const aiLosses = playerWins;        // AI loses when players win
   const aiDraws = playerDraws;        // Draws are the same
   const aiWinRate = totalGames > 0 ? ((aiWins / totalGames) * 100) : 0;
-  
-  // Get last 10 completed games for the current mode, sorted by most recent
-  // Add date validation to filter out games with invalid dates
-  // Ensure recentGames is always an array to prevent "filter is not a function" errors
-  const completedGames = (Array.isArray(recentGames) ? recentGames : [])
-    .filter(game => {
-      console.log('Filtering game:', { 
-        game_id: game.game_id, 
-        status: game.status, 
-        mode: game.mode, 
-        currentMode, 
-        last_move_at: game.last_move_at 
-      });
-      
-      // Don't filter out active games for now - let's see all games
-      // if (game.status === 'active') return false;
-      
-      // Filter by current mode (show single-player games for 'single' mode, community games for 'community' mode)
-      const gameMode = game.mode;
-      if (currentMode === 'single' && gameMode !== 'single') {
-        console.log('Filtered out: wrong mode for single', game.game_id);
-        return false;
-      }
-      if (currentMode === 'community' && gameMode !== 'community') {
-        console.log('Filtered out: wrong mode for community', game.game_id);
-        return false;
-      }
-      
-      try {
-        const date = new Date(game.last_move_at);
-        if (!isValid(date)) {
-          console.log('Filtered out: invalid date', game.game_id, game.last_move_at);
-          return false;
-        }
-        return true;
-      } catch {
-        console.log('Filtered out: date parse error', game.game_id);
-        return false;
-      }
-    })
-    .sort((a, b) => {
-      try {
-        const dateA = new Date(a.last_move_at);
-        const dateB = new Date(b.last_move_at);
-        return dateB.getTime() - dateA.getTime();
-      } catch {
-        return 0;
-      }
-    })
-    .slice(0, 10);
 
   const formatGameDate = (dateString: string) => {
     try {
@@ -112,10 +98,9 @@ const ModelStats: React.FC = memo(() => {
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-3 sm:p-4">
       {/* AI Model Performance */}
       <div className="mb-4">
-        <h2 className="text-xl sm:text-2xl font-bold mb-3 text-gray-900 dark:text-white">
-          AI Model Stats
+        <h2 className="text-xl text-center sm:text-2xl font-bold mb-3 text-gray-900 dark:text-white">
+          Model Stats
           <span className="text-sm font-normal text-gray-500 dark:text-gray-400 ml-2">
-            ({currentMode === 'community' ? 'Community Model' : 'Training Model'})
           </span>
         </h2>
         <div className="grid grid-cols-3 gap-3">
@@ -156,14 +141,16 @@ const ModelStats: React.FC = memo(() => {
         </div>
       </div>
 
+
+
       {/* Recent Games (from AI's perspective) */}
       <div>
         <h3 className="text-lg sm:text-xl font-semibold mb-3 text-gray-900 dark:text-white">
           Recent {currentMode === 'community' ? 'Community' : 'Training'} Games
         </h3>
-        {completedGames.length > 0 ? (
+        {filteredGames.length > 0 ? (
           <div className="space-y-2 max-h-64 overflow-y-auto">
-            {completedGames.map((game, index) => {
+            {filteredGames.map((game, index) => {
               // Show result from AI's perspective
               const getAIResult = (game: any) => {
                 switch (game.status) {
@@ -193,22 +180,16 @@ const ModelStats: React.FC = memo(() => {
                   key={game.game_id}
                   className="flex items-center justify-between p-2 sm:p-3 bg-gray-50 dark:bg-gray-700 rounded-lg"
                 >
-                  <div className="flex items-center space-x-3">
-                    <div className="text-xs text-gray-500 dark:text-gray-400 w-6">
-                      #{completedGames.length - index}
-                    </div>
+                  <div className="flex items-center">
                     <div>
                       <p className={`font-medium ${color}`}>
                         {result}
-                      </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
-                        vs Player • {formattedDate}
                       </p>
                     </div>
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-semibold text-gray-900 dark:text-white">
-                      {game.total_moves || 0} moves
+                      {Math.ceil((game.total_moves || 0) / 2)} moves
                     </p>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
                       {formattedDate}

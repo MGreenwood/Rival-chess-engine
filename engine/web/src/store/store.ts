@@ -52,6 +52,10 @@ const getApiAlternatives = (): string[] => {
 
 const API_BASE_URL = getApiBaseUrl();
 
+// Cache configuration
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+const BACKGROUND_REFRESH_INTERVAL = 2 * 60 * 1000; // 2 minutes
+
 export type GameMode = 'single' | 'community';
 
 export interface GameMetadata {
@@ -105,6 +109,11 @@ interface StoreState {
   currentAnalysis?: AnalysisResult;
   analysisHistory: AnalysisResult[];
   trainingMetrics?: TrainingMetrics;
+  statsCache: {
+    single: { stats: ModelStats | null; timestamp: number; recentGames: GameMetadata[] };
+    community: { stats: ModelStats | null; timestamp: number; recentGames: GameMetadata[] };
+  };
+  refreshInterval: number | null;
   gameActions: {
     makeMove: (move: string) => Promise<void>;
     viewPosition: (moves: string) => Promise<void>;
@@ -116,7 +125,9 @@ interface StoreState {
     setTheme: (theme: Theme) => void;
     setPreferences: (prefs: Partial<UserPreferences>) => void;
     setCurrentMode: (mode: GameMode) => void;
-    loadStatsForMode: (mode: GameMode) => Promise<void>;
+    loadStatsForMode: (mode: GameMode, forceRefresh?: boolean) => Promise<void>;
+    startPeriodicStatsRefresh: () => void;
+    stopPeriodicStatsRefresh: () => void;
   };
   init: () => Promise<void>;
 }
@@ -138,6 +149,11 @@ const useStore = create<StoreState>((set, get) => {
     currentAnalysis: undefined,
     analysisHistory: [],
     trainingMetrics: undefined,
+    statsCache: {
+      single: { stats: null, timestamp: 0, recentGames: [] },
+      community: { stats: null, timestamp: 0, recentGames: [] },
+    },
+    refreshInterval: null,
 
     gameActions: {
       makeMove: async (move: string) => {
@@ -189,12 +205,12 @@ const useStore = create<StoreState>((set, get) => {
             };
             set({ currentGame: newGameState, loading: false });
             
-            // If game ended, refresh stats (which will also refresh recent games)
+            // If game ended, invalidate cache and refresh stats
             if (response.data.status !== 'active') {
-              console.log('Game ended, refreshing stats and recent games...');
+              console.log('Game ended, invalidating cache and refreshing stats...');
               try {
-                // loadStatsForMode already refreshes recent games, so just call that
-                await get().uiActions.loadStatsForMode(get().currentMode);
+                // Force refresh to get updated stats immediately
+                await get().uiActions.loadStatsForMode(get().currentMode, true);
               } catch (refreshError) {
                 console.warn('Failed to refresh stats after game end:', refreshError);
               }
@@ -348,7 +364,15 @@ const useStore = create<StoreState>((set, get) => {
       deleteGame: async (gameId: string, mode: GameMode) => {
         try {
           await axios.delete(`${API_BASE_URL}/games/${mode}/${gameId}`);
-          get().init(); // Refresh recent games list
+          // Invalidate cache since game count changed
+          const state = get();
+          set({
+            statsCache: {
+              ...state.statsCache,
+              [mode]: { ...state.statsCache[mode], timestamp: 0 }
+            }
+          });
+          get().uiActions.loadStatsForMode(mode, true); // Force refresh
         } catch (error) {
           console.error('Failed to delete game:', error);
         }
@@ -366,17 +390,92 @@ const useStore = create<StoreState>((set, get) => {
         localStorage.setItem('chess_preferences', JSON.stringify(newPrefs));
       },
       setCurrentMode: (mode: GameMode) => {
-        set({ currentMode: mode });
-        // Load stats for the new mode
-        get().uiActions.loadStatsForMode(mode);
+        const currentMode = get().currentMode;
+        if (currentMode === mode) {
+          // Already in this mode, use cached data if available
+          const cached = get().statsCache[mode];
+          const isStale = Date.now() - cached.timestamp > CACHE_DURATION;
+          
+          if (!isStale && cached.stats) {
+            console.log(`📋 Using cached stats for ${mode}`);
+            set({
+              modelStats: cached.stats,
+              recentGames: cached.recentGames
+            });
+          } else {
+            console.log(`🔄 Cache stale for ${mode}, refreshing...`);
+            get().uiActions.loadStatsForMode(mode);
+          }
+          return;
+        }
+        
+        console.log(`🔄 Switching mode from ${currentMode} to ${mode}`);
+        
+        // Check if we have cached data for the new mode
+        const cached = get().statsCache[mode];
+        const isStale = Date.now() - cached.timestamp > CACHE_DURATION;
+        
+        if (!isStale && cached.stats) {
+          console.log(`📋 Using cached stats for ${mode}`);
+          set({
+            currentMode: mode,
+            modelStats: cached.stats,
+            recentGames: cached.recentGames
+          });
+        } else {
+          console.log(`💾 No valid cache for ${mode}, loading fresh data...`);
+          // Clear current stats and games to prevent showing stale data
+          set({ 
+            currentMode: mode,
+            modelStats: null,
+            recentGames: []
+          });
+          // Load fresh data
+          get().uiActions.loadStatsForMode(mode);
+        }
       },
-      loadStatsForMode: async (mode: GameMode) => {
+      loadStatsForMode: async (mode: GameMode, forceRefresh?: boolean) => {
+        console.log(`📊 Loading stats for mode: ${mode} (forceRefresh: ${forceRefresh})`);
+        
+        // Check cache first (unless forcing refresh)
+        if (!forceRefresh) {
+          const cached = get().statsCache[mode];
+          const isStale = Date.now() - cached.timestamp > CACHE_DURATION;
+          
+          if (!isStale && cached.stats) {
+            console.log(`⚡ Using cached stats for ${mode} (age: ${Math.round((Date.now() - cached.timestamp) / 1000)}s)`);
+            
+            // Only update if we're still in the same mode
+            const currentMode = get().currentMode;
+            if (currentMode === mode) {
+              set({
+                modelStats: cached.stats,
+                recentGames: cached.recentGames
+              });
+            }
+            return;
+          }
+        }
+        
         try {
           const statsResponse = await axios.get(`${API_BASE_URL}/stats`);
           const statsKey = mode === 'community' ? 'community_model' : 'single_player_model';
           
+          console.log(`📈 Fresh stats response for ${mode}:`, {
+            hasData: !!statsResponse.data[statsKey],
+            totalGames: statsResponse.data[statsKey]?.total_games || 0,
+            statsKey
+          });
+          
           if (statsResponse.data[statsKey]) {
             const stats = statsResponse.data[statsKey];
+            
+            // Only update if we're still in the same mode (prevent race conditions)
+            const currentMode = get().currentMode;
+            if (currentMode !== mode) {
+              console.log(`⚠️ Mode changed during stats loading, ignoring results for ${mode}`);
+              return;
+            }
             
             // If we get 0 total games, try refreshing stats once
             if (stats.total_games === 0) {
@@ -385,17 +484,36 @@ const useStore = create<StoreState>((set, get) => {
                 const refreshResponse = await axios.post(`${API_BASE_URL}/stats/refresh`);
                 if (refreshResponse.data[statsKey] && refreshResponse.data[statsKey].total_games > 0) {
                   console.log('Stats refresh successful!');
-                  set({ modelStats: refreshResponse.data[statsKey] });
+                  const refreshedStats = refreshResponse.data[statsKey];
                   
-                            // Also refresh recent games when stats are refreshed
-          try {
-            console.log('🔄 Refreshing recent games from:', `${API_BASE_URL}/recent-games`);
-            const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
-            console.log('📥 Refresh recent games response:', recentGamesResponse.data?.length || 0, 'games');
-            set({ recentGames: Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [] });
-          } catch (recentGamesError) {
-            console.error('❌ Failed to refresh recent games:', recentGamesError);
-            set({ recentGames: [] });
+                  // Cache the refreshed stats
+                  const state = get();
+                  set({
+                    modelStats: refreshedStats,
+                    statsCache: {
+                      ...state.statsCache,
+                      [mode]: { stats: refreshedStats, timestamp: Date.now(), recentGames: state.recentGames }
+                    }
+                  });
+                  
+                  // Also refresh recent games when stats are refreshed
+                  try {
+                    console.log('🔄 Refreshing recent games from:', `${API_BASE_URL}/recent-games`);
+                    const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+                    console.log('📥 Refresh recent games response:', recentGamesResponse.data?.length || 0, 'games');
+                    const allGames = Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [];
+                    
+                    // Update cache with new games
+                    const finalState = get();
+                    set({ 
+                      recentGames: allGames,
+                      statsCache: {
+                        ...finalState.statsCache,
+                        [mode]: { stats: refreshedStats, timestamp: Date.now(), recentGames: allGames }
+                      }
+                    });
+                  } catch (recentGamesError) {
+                    console.error('❌ Failed to refresh recent games:', recentGamesError);
                   }
                   return;
                 }
@@ -404,32 +522,62 @@ const useStore = create<StoreState>((set, get) => {
               }
             }
             
+            console.log(`✅ Setting stats for ${mode}:`, stats);
             set({ modelStats: stats });
           } else {
-            set({
-              modelStats: {
-                wins: 0,
-                losses: 0,
-                draws: 0,
-                total_games: 0,
-                win_rate: 0.0
-              }
-            });
+            console.log(`❌ No stats found for ${mode}, using defaults`);
+            const defaultStats = {
+              wins: 0,
+              losses: 0,
+              draws: 0,
+              total_games: 0,
+              win_rate: 0.0
+            };
+            set({ modelStats: defaultStats });
           }
           
           // Always refresh recent games when loading stats for a mode
           try {
             console.log('🔄 Loading recent games from:', `${API_BASE_URL}/recent-games`);
             const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+            
+            // Check if we're still in the same mode (prevent race conditions)
+            const currentMode = get().currentMode;
+            if (currentMode !== mode) {
+              console.log(`⚠️ Mode changed during recent games loading, ignoring results for ${mode}`);
+              return;
+            }
+            
             console.log('📥 Recent games response:', {
               status: recentGamesResponse.status,
               dataType: typeof recentGamesResponse.data,
               isArray: Array.isArray(recentGamesResponse.data),
               length: recentGamesResponse.data?.length,
-              data: recentGamesResponse.data
+              mode: mode
             });
-            set({ recentGames: Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [] });
-            console.log('✅ Recent games set in store:', recentGamesResponse.data?.length || 0, 'games');
+            
+            const allGames = Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [];
+            const currentStats = get().modelStats;
+            
+            // Update cache with fresh data
+            const state = get();
+            set({ 
+              recentGames: allGames,
+              statsCache: {
+                ...state.statsCache,
+                [mode]: { 
+                  stats: currentStats, 
+                  timestamp: Date.now(), 
+                  recentGames: allGames 
+                }
+              }
+            });
+            
+            console.log(`✅ Recent games cached for ${mode}:`, {
+              totalGames: allGames.length,
+              gamesForMode: allGames.filter(g => g.mode === mode).length,
+              cacheTimestamp: Date.now()
+            });
           } catch (recentGamesError) {
             console.error('❌ Failed to load recent games:', recentGamesError);
             console.error('API URL was:', `${API_BASE_URL}/recent-games`);
@@ -446,6 +594,30 @@ const useStore = create<StoreState>((set, get) => {
               win_rate: 0.0
             }
           });
+        }
+      },
+      startPeriodicStatsRefresh: () => {
+        // Clear any existing interval
+        const currentInterval = get().refreshInterval;
+        if (currentInterval) {
+          clearInterval(currentInterval);
+        }
+        
+        console.log('🔄 Starting periodic stats refresh...');
+        const intervalId = setInterval(() => {
+          const currentMode = get().currentMode;
+          console.log(`⏰ Background refresh for ${currentMode}`);
+          get().uiActions.loadStatsForMode(currentMode, true);
+        }, BACKGROUND_REFRESH_INTERVAL);
+        
+        set({ refreshInterval: intervalId });
+      },
+      stopPeriodicStatsRefresh: () => {
+        const currentInterval = get().refreshInterval;
+        if (currentInterval) {
+          console.log('⏹️ Stopping periodic stats refresh');
+          clearInterval(currentInterval);
+          set({ refreshInterval: null });
         }
       }
     },
@@ -472,6 +644,9 @@ const useStore = create<StoreState>((set, get) => {
 
           // Load model stats for the current mode
           await get().uiActions.loadStatsForMode(get().currentMode);
+
+          // Start periodic refresh
+          get().uiActions.startPeriodicStatsRefresh();
 
           // Load recent games
           try {

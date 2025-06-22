@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { SettingsPanel } from './SettingsPanel';
+import DonationButton from './DonationButton';
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const location = useLocation();
 
   return (
-    <div className="min-h-screen bg-white dark:bg-gray-900 transition-colors">
+    <div className="min-h-screen bg-white dark:bg-gray-900 transition-colors flex flex-col">
       {/* Title Bar */}
       <div className="fixed top-0 left-0 right-0 h-14 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center px-4 z-10 transition-colors">
         <div className="flex-1 flex items-center">
@@ -17,27 +18,38 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
           <div className="ml-4 flex items-center space-x-4">
             <Link
               to="/train"
-              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+              className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
                 location.pathname === '/train'
                   ? 'bg-blue-600 text-white'
                   : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
               }`}
             >
-              Train the Model
+              <span className="hidden sm:inline">Train the Model</span>
+              <span className="sm:hidden">Train</span>
             </Link>
             <Link
               to="/community"
-              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+              className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
                 location.pathname === '/community'
                   ? 'bg-blue-600 text-white'
                   : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
               }`}
             >
-              Community Challenge
+              <span className="hidden sm:inline">Community Challenge</span>
+              <span className="sm:hidden">Community</span>
             </Link>
           </div>
         </div>
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center space-x-2">
+          {/* Subtle donation button */}
+          <div className="scale-75 hover:scale-90 transition-transform">
+            <DonationButton 
+              size="small" 
+              variant="ghost"
+              text="❤️ Support"
+              className="text-xs"
+            />
+          </div>
           <button
             onClick={() => setIsSettingsOpen(true)}
             className="p-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
@@ -51,7 +63,26 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         </div>
       </div>
 
-      {children}
+      <main className="flex-1 pt-14">
+        {children}
+      </main>
+
+      {/* Footer with subtle donation option */}
+      <footer className="mt-auto py-4 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 transition-colors">
+        <div className="max-w-4xl mx-auto px-4 text-center">
+          <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+            Made with ❤️ for chess lovers • Advanced AI chess training
+          </p>
+          <div className="scale-90">
+            <DonationButton 
+              text="Support Development"
+              variant="primary"
+              size="small"
+              className="text-xs"
+            />
+          </div>
+        </div>
+      </footer>
 
       <SettingsPanel
         isOpen={isSettingsOpen}

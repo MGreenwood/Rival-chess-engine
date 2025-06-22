@@ -3,6 +3,7 @@ import { Chessboard } from 'react-chessboard';
 import type { Square } from 'react-chessboard/dist/chessboard/types';
 import { Chess } from 'chess.js';
 import axios from 'axios';
+import DonationButton from './DonationButton';
 
 // Dynamic API base URL - inline to avoid import issues
 const getApiBaseUrl = (): string => {
@@ -65,6 +66,8 @@ export const CommunityGame: React.FC = () => {
   const [showProcessingOverlay, setShowProcessingOverlay] = useState<boolean>(false);
   const [lastVoteResults, setLastVoteResults] = useState<Record<string, number> | null>(null);
   const [boardSize, setBoardSize] = useState<number>(600);
+  const [isDragging, setIsDragging] = useState(false);
+  const boardContainerRef = useRef<HTMLDivElement>(null);
 
   // Create voter session on component mount
   useEffect(() => {
@@ -135,6 +138,82 @@ export const CommunityGame: React.FC = () => {
     }
   }, [gameState?.engine_thinking, engineThinkingStartTime]);
 
+  // Add right-click handler to cancel dragging
+  useEffect(() => {
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const boardContainer = boardContainerRef.current;
+      
+      // Handle right-clicks anywhere when dragging, or on board when not dragging
+      if (e.button === 2 && (isDragging || (boardContainer && boardContainer.contains(target)))) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Cancel our internal state
+        setSelectedSquare(null);
+        setIsDragging(false);
+        
+        // Force cancel any ongoing drag by triggering a mouseup event
+        const mouseUpEvent = new MouseEvent('mouseup', {
+          bubbles: true,
+          cancelable: true,
+          button: 0
+        });
+        
+        // Dispatch to any dragged piece or the board itself
+        const draggedPiece = document.querySelector('[data-piece][style*="transform"]');
+        if (draggedPiece) {
+          draggedPiece.dispatchEvent(mouseUpEvent);
+          console.log('🔴 FORCED DROP: Dispatched mouseup to dragged piece');
+        } else if (boardContainer) {
+          boardContainer.dispatchEvent(mouseUpEvent);
+          console.log('🔴 FORCED DROP: Dispatched mouseup to board');
+        }
+        
+        console.log('🔴 RIGHT-CLICK DETECTED - canceling drag/selection (isDragging:', isDragging, ')');
+        return;
+      }
+      
+      if (boardContainer && boardContainer.contains(target)) {
+        console.log('MouseDown on board - button:', e.button, 'target:', target.tagName, 'className:', target.className);
+        
+        // Left-click on piece - start dragging
+        if (target.closest('[data-piece]') && e.button === 0) {
+          setIsDragging(true);
+          console.log('🔵 Started dragging piece');
+        }
+      }
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      // Prevent context menu on chessboard
+      const boardContainer = boardContainerRef.current;
+      if (boardContainer && boardContainer.contains(e.target as Node)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      // Clear dragging state on mouse up
+      if (isDragging) {
+        setIsDragging(false);
+        console.log('Finished dragging');
+      }
+    };
+
+    // Use document-level listeners with capture flag to catch events early
+    document.addEventListener('mousedown', handleMouseDown, { capture: true });
+    document.addEventListener('contextmenu', handleContextMenu, { capture: true });
+    document.addEventListener('mouseup', handleMouseUp);
+    
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown, { capture: true });
+      document.removeEventListener('contextmenu', handleContextMenu, { capture: true });
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
+
   // Update chess.js game state when server state changes
   useEffect(() => {
     if (gameState?.board) {
@@ -196,56 +275,65 @@ export const CommunityGame: React.FC = () => {
     return () => clearInterval(interval);
   }, [gameState?.engine_thinking, gameState?.is_voting_phase, timeLeft]);
 
-  // Track when vote processing should have started and show fallback overlay
+  // Simplified overlay management - single source of truth
   useEffect(() => {
-    // Show overlay ONLY when voting has ended but engine hasn't moved yet
-    if (!gameState?.is_voting_phase && !gameState?.engine_thinking && gameState?.current_votes && Object.keys(gameState.current_votes).length > 0 && !showProcessingOverlay) {
-      // Voting just ended, capture vote results and show overlay
+    // CASE 1: Engine is actively thinking → show overlay
+    if (gameState?.engine_thinking) {
+      if (!showProcessingOverlay) {
+        console.log('🤖 ENGINE THINKING - SHOWING OVERLAY');
+        setShowProcessingOverlay(true);
+        if (!engineThinkingStartTime) {
+          setEngineThinkingStartTime(Date.now());
+        }
+      }
+      return; // Early exit - engine thinking takes priority
+    }
+
+    // CASE 2: Voting ended, votes exist, but engine hasn't moved yet → show overlay  
+    if (!gameState?.is_voting_phase && 
+        gameState?.current_votes && 
+        Object.keys(gameState.current_votes).length > 0 && 
+        !showProcessingOverlay) {
+      console.log('🗳️ VOTES NEED PROCESSING - SHOWING OVERLAY');
       setLastVoteResults(gameState.current_votes);
       setVoteProcessingStartTime(Date.now());
-      console.log('🗳️ VOTING ENDED - SHOWING PROCESSING OVERLAY');
       setShowProcessingOverlay(true);
-    } else if (gameState?.engine_thinking) {
-      // Engine is thinking - keep overlay but update state
-      console.log('🤖 ENGINE THINKING DETECTED - KEEPING OVERLAY');
-      if (voteProcessingStartTime) {
-        setEngineThinkingStartTime(voteProcessingStartTime); // Transfer the start time
-        setVoteProcessingStartTime(null);
-      }
-    } else if (gameState?.is_voting_phase) {
-      // Voting restarted - hide overlay and clear all engine thinking state
-      console.log('🗳️ NEW VOTING PHASE STARTED - HIDING OVERLAY');
+      return;
+    }
+
+    // CASE 3: New voting phase started → hide overlay
+    if (gameState?.is_voting_phase && showProcessingOverlay) {
+      console.log('🗳️ NEW VOTING STARTED - HIDING OVERLAY');
+      setShowProcessingOverlay(false);
+      setVoteProcessingStartTime(null);
+      setEngineThinkingStartTime(null);
+      setEngineThinkingElapsed(0);
+      return;
+    }
+
+    // CASE 4: Engine stopped thinking and no votes to process → hide overlay
+    if (!gameState?.engine_thinking && 
+        (!gameState?.current_votes || Object.keys(gameState.current_votes).length === 0) && 
+        showProcessingOverlay) {
+      console.log('🔓 ENGINE DONE, NO VOTES - HIDING OVERLAY');
       setShowProcessingOverlay(false);
       setVoteProcessingStartTime(null);
       setEngineThinkingStartTime(null);
       setEngineThinkingElapsed(0);
     }
-  }, [gameState?.is_voting_phase, gameState?.engine_thinking, gameState?.current_votes, showProcessingOverlay, voteProcessingStartTime]);
+  }, [gameState?.engine_thinking, gameState?.is_voting_phase, gameState?.current_votes]);
 
-  // Hide processing overlay when moves are detected (engine finished)
+  // Hide overlay when new moves are detected (engine finished)
   useEffect(() => {
     const currentMoveCount = gameState?.move_history?.length || 0;
-    if (previousMoveCountRef.current < currentMoveCount) {
-      console.log('🎯 NEW MOVE DETECTED - HIDING PROCESSING OVERLAY');
-      console.log('Previous move count:', previousMoveCountRef.current, 'Current:', currentMoveCount);
+    if (previousMoveCountRef.current < currentMoveCount && showProcessingOverlay) {
+      console.log('🎯 NEW MOVE DETECTED - HIDING OVERLAY');
       setShowProcessingOverlay(false);
       setVoteProcessingStartTime(null);
       setEngineThinkingStartTime(null);
       setEngineThinkingElapsed(0);
-      // Note: previousMoveCountRef.current is updated elsewhere in the board effect
     }
   }, [gameState?.move_history?.length]);
-
-  // Also hide overlay when engine thinking flag goes false (backup method)
-  useEffect(() => {
-    if (!gameState?.engine_thinking && (voteProcessingStartTime || engineThinkingStartTime)) {
-      console.log('🔓 ENGINE THINKING ENDED - HIDING OVERLAY (backup method)');
-      setShowProcessingOverlay(false);
-      setVoteProcessingStartTime(null);
-      setEngineThinkingStartTime(null);
-      setEngineThinkingElapsed(0);
-    }
-  }, [gameState?.engine_thinking, voteProcessingStartTime, engineThinkingStartTime]);
 
   // Update countdown timer with improved broken state detection
   useEffect(() => {
@@ -289,6 +377,9 @@ export const CommunityGame: React.FC = () => {
   }, [gameState?.voting_ends_at, gameState?.is_voting_phase]);
 
   const handleSquareClick = useCallback((square: Square) => {
+    // Clear dragging state on click
+    setIsDragging(false);
+    
     if (!gameState?.can_vote || !voterSession || gameState?.engine_thinking) {
       if (gameState?.engine_thinking) {
         setErrorMessage('Please wait - engine is thinking');
@@ -321,6 +412,9 @@ export const CommunityGame: React.FC = () => {
   }, [game, gameState?.can_vote, gameState?.engine_thinking, voterSession, selectedSquare]);
 
   const handlePieceDrop = useCallback((sourceSquare: Square, targetSquare: Square) => {
+    // Clear dragging state when drop occurs
+    setIsDragging(false);
+    
     if (!gameState?.can_vote || !voterSession || gameState?.engine_thinking) {
       if (gameState?.engine_thinking) {
         setErrorMessage('Please wait - engine is thinking');
@@ -560,35 +654,33 @@ export const CommunityGame: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col items-center w-full max-w-4xl mx-auto">
+    <div className="flex flex-col items-center w-full max-w-3xl mx-auto">
       {/* Header */}
-      <div className="flex flex-col items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Community vs AI</h2>
+      <div className="flex flex-col items-center mb-3">
+        <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">Community vs AI</h2>
         {gameState.experiment_name && (
-          <div className="text-lg text-gray-600 dark:text-gray-300">
+          <div className="text-base text-gray-600 dark:text-gray-300">
             Playing against: {gameState.experiment_name}
           </div>
         )}
       </div>
 
       {/* Game Status - Moved to top for visibility */}
-      <div className="mb-6 text-center w-full">
-        <div className="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">
+      <div className="mb-3 text-center w-full">
+        <div className="text-base font-semibold mb-2 text-gray-900 dark:text-gray-100">
           {getStatusMessage()}
         </div>
         
         {/* Error Message - Prominently displayed at top */}
         {errorMessage && (
-          <div className="mb-4 text-center text-red-500 bg-red-50 border border-red-200 rounded-lg px-4 py-2 mx-auto max-w-2xl">
+          <div className="mb-2 text-center text-red-500 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mx-auto max-w-xl">
             {errorMessage}
           </div>
         )}
 
-
-        
         {/* Your Current Vote - Also prominently displayed */}
         {userVote && (
-          <div className="bg-green-100 border border-green-300 text-green-800 px-4 py-2 rounded-lg mb-4 mx-auto max-w-2xl">
+          <div className="bg-green-100 border border-green-300 text-green-800 px-3 py-2 rounded-lg mb-2 mx-auto max-w-xl">
             ✅ Your vote: <span className="font-mono font-bold">{userVote}</span>
           </div>
         )}
@@ -614,7 +706,8 @@ export const CommunityGame: React.FC = () => {
       </div>
 
       {/* Chessboard - Centered with Engine Thinking Overlay */}
-      <div className="w-full aspect-square mb-6 relative" style={{ maxWidth: `${boardSize}px` }}>
+      <div className="border-2 border-gray-200 dark:border-gray-600 rounded-lg p-2 mb-3" style={{ maxWidth: `${boardSize + 16}px` }}>
+        <div ref={boardContainerRef} className="w-full aspect-square relative">
         <Chessboard
           position={previewPosition || gameState.board}
           onSquareClick={handleSquareClick}
@@ -680,18 +773,29 @@ export const CommunityGame: React.FC = () => {
                 </div>
               )}
               
-              <div className="text-sm text-gray-600 dark:text-gray-300">
+              <div className="text-sm text-gray-600 dark:text-gray-300 mb-4">
                 Running MCTS simulations... (up to 10s)
+              </div>
+              
+              {/* Perfect captive audience moment for donation! */}
+              <div className="border-t pt-4 mt-4 border-gray-200 dark:border-gray-600">
+                <DonationButton 
+                  context="thinking"
+                  size="small"
+                  variant="ghost"
+                  className="text-center scale-90"
+                />
               </div>
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* Vote Tally - Below chessboard */}
       {gameState.current_votes && Object.keys(gameState.current_votes).length > 0 && (
-        <div className="mb-4 p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg w-full max-w-2xl transition-colors">
-          <h3 className="text-lg font-semibold mb-2 text-gray-900 dark:text-white text-center">
+        <div className="mb-2 p-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg w-full max-w-xl transition-colors">
+          <h3 className="text-base font-semibold mb-2 text-gray-900 dark:text-white text-center">
             Current Votes
           </h3>
           <div className="grid grid-cols-2 gap-4">
@@ -712,26 +816,28 @@ export const CommunityGame: React.FC = () => {
         </div>
       )}
 
-      {/* Controls - At bottom */}
-      <div className="flex flex-wrap gap-4 justify-center">
-        {userVote && (
-          <button
-            onClick={handleUndoVote}
-            className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-          >
-            Undo Vote
-          </button>
-        )}
-        
-        {gameState.status !== 'active' && (
-          <button
-            onClick={handleStartNewGame}
-            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
-          >
-            Start New Game
-          </button>
-        )}
-      </div>
+      {/* Controls - At bottom - Only show when there are controls */}
+      {(userVote || gameState.status !== 'active') && (
+        <div className="flex flex-wrap gap-4 justify-center">
+          {userVote && (
+            <button
+              onClick={handleUndoVote}
+              className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              Undo Vote
+            </button>
+          )}
+          
+          {gameState.status !== 'active' && (
+            <button
+              onClick={handleStartNewGame}
+              className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+            >
+              Start New Game
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }; 

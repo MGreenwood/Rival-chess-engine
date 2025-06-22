@@ -31,6 +31,7 @@ export function ChessGame({
   const [lastMoveTo, setLastMoveTo] = useState<Square | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [lastReportedGameStatus, setLastReportedGameStatus] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const { gameActions, currentGame, loading } = useStore();
   const { makeMove, startNewGame } = gameActions;
@@ -215,6 +216,9 @@ export function ChessGame({
 
   // Fix the onPieceDrop to NOT make moves for promotions
   const onPieceDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
+    // Clear dragging state when drop occurs
+    setIsDragging(false);
+    
     const result = onDrop(sourceSquare, targetSquare, piece);
     
     if (result) {
@@ -250,6 +254,7 @@ export function ChessGame({
   const onSquareClick = useCallback((square: Square) => {
     if (!viewOnly && !isInitializing && !loading) {
       setSelectedSquare(prev => prev === square ? null : square);
+      setIsDragging(false); // Clear dragging state on click
     }
   }, [viewOnly, isInitializing, loading]);
 
@@ -263,6 +268,82 @@ export function ChessGame({
       return () => clearTimeout(timer);
     }
   }, [moveError]);
+
+  // Add right-click handler to cancel dragging
+  useEffect(() => {
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const boardContainer = containerRef.current;
+      
+      // Handle right-clicks anywhere when dragging, or on board when not dragging
+      if (e.button === 2 && (isDragging || (boardContainer && boardContainer.contains(target)))) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Cancel our internal state
+        setSelectedSquare(null);
+        setIsDragging(false);
+        
+        // Force cancel any ongoing drag by triggering a mouseup event
+        const mouseUpEvent = new MouseEvent('mouseup', {
+          bubbles: true,
+          cancelable: true,
+          button: 0
+        });
+        
+        // Dispatch to any dragged piece or the board itself
+        const draggedPiece = document.querySelector('[data-piece][style*="transform"]');
+        if (draggedPiece) {
+          draggedPiece.dispatchEvent(mouseUpEvent);
+          console.log('🔴 FORCED DROP: Dispatched mouseup to dragged piece');
+        } else if (boardContainer) {
+          boardContainer.dispatchEvent(mouseUpEvent);
+          console.log('🔴 FORCED DROP: Dispatched mouseup to board');
+        }
+        
+        console.log('🔴 RIGHT-CLICK DETECTED - canceling drag/selection (isDragging:', isDragging, ')');
+        return;
+      }
+      
+      if (boardContainer && boardContainer.contains(target)) {
+        console.log('MouseDown on board - button:', e.button, 'target:', target.tagName, 'className:', target.className);
+        
+        // Left-click on piece - start dragging
+        if (target.closest('[data-piece]') && e.button === 0) {
+          setIsDragging(true);
+          console.log('🔵 Started dragging piece');
+        }
+      }
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      // Prevent context menu on chessboard
+      const boardContainer = containerRef.current;
+      if (boardContainer && boardContainer.contains(e.target as Node)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      // Clear dragging state on mouse up
+      if (isDragging) {
+        setIsDragging(false);
+        console.log('Finished dragging');
+      }
+    };
+
+    // Use document-level listeners with capture flag to catch events early
+    document.addEventListener('mousedown', handleMouseDown, { capture: true });
+    document.addEventListener('contextmenu', handleContextMenu, { capture: true });
+    document.addEventListener('mouseup', handleMouseUp);
+    
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown, { capture: true });
+      document.removeEventListener('contextmenu', handleContextMenu, { capture: true });
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
 
   return (
     <div ref={containerRef} className="w-full h-full relative">

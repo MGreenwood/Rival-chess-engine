@@ -12,21 +12,22 @@ const CommunityChallenge: React.FC = () => {
   }, [uiActions]);
 
   return (
-    <div className="fixed inset-0 pt-14 flex bg-white dark:bg-gray-900 transition-colors">
+    <>
+    <div className="flex bg-white dark:bg-gray-900 transition-colors">
       {/* Left sidebar - Model Stats */}
       <div className="w-80 p-4 hidden lg:block overflow-y-auto scrollbar-hide">
         <ModelStats />
       </div>
 
       {/* Main game area */}
-      <div className="flex-1 flex flex-col items-center justify-start p-4 pb-64 lg:pb-4 overflow-y-auto scrollbar-hide">
+      <div className="flex-1 flex flex-col items-center justify-start p-2 overflow-y-auto scrollbar-hide">
         <CommunityGame />
       </div>
 
       {/* Right sidebar - How to Play */}
       <div className="w-80 p-4 hidden lg:block overflow-y-auto scrollbar-hide">
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4">
-          <h2 className="text-xl font-bold mb-3 text-gray-900 dark:text-white">
+          <h2 className="text-xl font-bold mb-3 text-gray-900 dark:text-white text-center">
             How to Play
           </h2>
           <ul className="space-y-2 text-gray-600 dark:text-gray-300">
@@ -39,27 +40,29 @@ const CommunityChallenge: React.FC = () => {
         </div>
       </div>
 
-      {/* Mobile view for sidebars */}
-      <div className="fixed bottom-4 left-4 right-4 lg:hidden bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg transition-colors">
-        <div className="grid grid-cols-2 gap-3 p-3">
-          <div className="col-span-1 overflow-y-auto scrollbar-hide max-h-48">
-            <ModelStats />
-          </div>
-          <div className="col-span-1 overflow-y-auto scrollbar-hide max-h-48">
-            <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-3">
-              <h2 className="text-lg font-bold mb-2 text-gray-900 dark:text-white">
-                How to Play
-              </h2>
-              <ul className="space-y-1 text-sm text-gray-600 dark:text-gray-300">
-                <li>• Drag pieces to vote</li>
-                <li>• Auto 10-second timer</li>
-                <li>• Most votes wins</li>
-              </ul>
-            </div>
+    </div>
+    
+    {/* Mobile view for sidebars */}
+    <div className="lg:hidden bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg transition-colors m-2">
+      <div className="grid grid-cols-2 gap-2 p-2">
+        <div className="col-span-1 overflow-y-auto scrollbar-hide max-h-32">
+          <ModelStats />
+        </div>
+        <div className="col-span-1 overflow-y-auto scrollbar-hide max-h-32">
+          <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-2">
+            <h2 className="text-base font-bold mb-1 text-gray-900 dark:text-white text-center">
+              How to Play
+            </h2>
+            <ul className="space-y-0.5 text-xs text-gray-600 dark:text-gray-300">
+              <li>• Drag pieces to vote</li>
+              <li>• Auto 10-second timer</li>
+              <li>• Most votes wins</li>
+            </ul>
           </div>
         </div>
       </div>
     </div>
+    </>
   );
 };
 
