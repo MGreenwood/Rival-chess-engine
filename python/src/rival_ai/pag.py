@@ -1145,9 +1145,7 @@ class PositionalAdjacencyGraph:
     def move_to_index(move: chess.Move) -> int:
         """Convert a chess move to a unique index in the range [0, 5311].
         
-        The index is calculated as:
-        - For non-promotion moves: from_square * 64 + to_square
-        - For promotion moves: 4096 + (from_square * 64 + to_square) * 4 + promotion_piece_type - 1
+        Uses FIXED compact encoding that fits within the policy vector bounds.
         
         Args:
             move: The chess move to convert
@@ -1156,11 +1154,37 @@ class PositionalAdjacencyGraph:
             Integer index in range [0, 5311]
         """
         if move.promotion:
-            # Promotion moves: 4096 + (from_square * 64 + to_square) * 4 + promotion_piece_type - 1
-            base = 4096 + (move.from_square * 64 + move.to_square) * 4
-            return base + move.promotion - 1
+            # 🔥 FIXED: Use compact encoding that fits in available slots
+            piece_type = {
+                chess.KNIGHT: 0,
+                chess.BISHOP: 1, 
+                chess.ROOK: 2,
+                chess.QUEEN: 3
+            }.get(move.promotion, 3)
+            
+            from_file = move.from_square % 8
+            from_rank = move.from_square // 8
+            to_file = move.to_square % 8
+            to_rank = move.to_square // 8
+            
+            if to_file == from_file:
+                direction = 0
+            elif to_file == from_file - 1:
+                direction = 1
+            elif to_file == from_file + 1:
+                direction = 2
+            else:
+                return 0  # Invalid promotion
+            
+            if from_rank == 6 and to_rank == 7:
+                side_offset = 0
+            elif from_rank == 1 and to_rank == 0:
+                side_offset = 96
+            else:
+                return 0  # Invalid promotion
+            
+            return 4096 + side_offset + (from_file * 12) + (direction * 4) + piece_type
         else:
-            # Regular moves: from_square * 64 + to_square
             return move.from_square * 64 + move.to_square
     
     @staticmethod

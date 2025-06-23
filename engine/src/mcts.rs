@@ -473,15 +473,17 @@ impl MCTS {
         if let Some(promotion) = promotion {
             // Promotion moves are encoded after regular moves
             // Formula: 4096 + (from_square * 64 + to_square) * 4 + promotion_piece_type - 1
-            let piece_offset = match promotion {
-                chess::Piece::Knight => 0,  // promotion = 1, so 1-1 = 0
-                chess::Piece::Bishop => 1,  // promotion = 2, so 2-1 = 1
-                chess::Piece::Rook => 2,    // promotion = 3, so 3-1 = 2
-                chess::Piece::Queen => 3,   // promotion = 4, so 4-1 = 3
+            // Must match the PAG encoding scheme: Knight=1, Bishop=2, Rook=3, Queen=4
+            let promotion_piece_type = match promotion {
+                chess::Piece::Knight => 1,
+                chess::Piece::Bishop => 2,
+                chess::Piece::Rook => 3,
+                chess::Piece::Queen => 4,
                 _ => return None,
             };
+            
             let base = 4096 + (from * 64 + to) * 4;
-            let index = base + piece_offset;
+            let index = base + promotion_piece_type - 1;  // -1 to convert to 0-based
             
             // Ensure the index is within bounds
             if index < 5312 {

@@ -115,15 +115,61 @@ impl Engine {
 
                 let mut moves = Vec::new();
                 let mut probs = Vec::new();
+                let mut promotion_moves = Vec::new();
+                let mut promotion_probs = Vec::new();
 
                 // Collect legal moves and their probabilities
                 for mv in MoveGen::new_legal(&board) {
                     if let Some(idx) = self.model.move_to_policy_idx(mv) {
                         if idx < policy.len() {
+                            let prob = policy[idx].max(0.0);
                             moves.push(mv);
-                            probs.push(policy[idx].max(0.0));  // Ensure non-negative probability
+                            probs.push(prob);
+                            
+                            // Track promotion moves separately for debugging
+                            if mv.get_promotion().is_some() {
+                                promotion_moves.push(mv);
+                                promotion_probs.push(prob);
+                            }
                         }
                     }
+                }
+
+                // Debug: Print promotion move info if any exist
+                if !promotion_moves.is_empty() {
+                    eprintln!("🔥 PROMOTION DEBUG:");
+                    eprintln!("   Position: {}", board.to_string());
+                    eprintln!("   Found {} promotion moves:", promotion_moves.len());
+                    for (i, mv) in promotion_moves.iter().enumerate() {
+                        let piece_char = match mv.get_promotion().unwrap() {
+                            chess::Piece::Queen => "Q",
+                            chess::Piece::Rook => "R", 
+                            chess::Piece::Bishop => "B",
+                            chess::Piece::Knight => "N",
+                            _ => "?",
+                        };
+                        eprintln!("     {} -> {} ({}): prob = {:.6}", 
+                                mv.get_source(), mv.get_dest(), piece_char, promotion_probs[i]);
+                    }
+                    
+                    // Find best non-promotion move for comparison
+                    let mut best_non_promotion_prob = 0.0;
+                    let mut best_non_promotion_move = None;
+                    for (i, mv) in moves.iter().enumerate() {
+                        if mv.get_promotion().is_none() && probs[i] > best_non_promotion_prob {
+                            best_non_promotion_prob = probs[i];
+                            best_non_promotion_move = Some(*mv);
+                        }
+                    }
+                    
+                    if let Some(best_move) = best_non_promotion_move {
+                        eprintln!("   Best non-promotion: {} (prob = {:.6})", best_move, best_non_promotion_prob);
+                    }
+                    
+                    let max_promotion_prob = promotion_probs.iter().fold(0.0f32, |a, &b| a.max(b));
+                    eprintln!("   Max promotion prob: {:.6}", max_promotion_prob);
+                    eprintln!("   🔥 This suggests the model {} learned promotion values properly!", 
+                             if max_promotion_prob > 0.01 { "HAS" } else { "has NOT" });
                 }
 
                 if moves.is_empty() {
@@ -149,7 +195,15 @@ impl Engine {
                         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                         .map(|(i, _)| i)
                         .unwrap_or(0);
-                    return Some(moves[best_idx]);
+                    let selected_move = moves[best_idx];
+                    
+                    // Debug if we're NOT picking a promotion when available
+                    if !promotion_moves.is_empty() && selected_move.get_promotion().is_none() {
+                        eprintln!("⚠️ PROMOTION ISSUE: Model chose non-promotion {} over {} available promotions!", 
+                                selected_move, promotion_moves.len());
+                    }
+                    
+                    return Some(selected_move);
                 }
 
                 // Sample move based on probabilities

@@ -7,14 +7,14 @@ import time
 import logging
 import torch
 import numpy as np
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+import random
+from typing import List, Dict, Tuple, Optional, Any
+from dataclasses import dataclass, field
 from collections import defaultdict, deque
 from tqdm import tqdm
 from pathlib import Path
 import chess
 from torch.utils.data import Dataset
-import random
 import pickle
 from datetime import datetime
 import traceback
@@ -40,6 +40,10 @@ class SelfPlayConfig:
     prefetch_factor: int = 2
     save_dir: Optional[str] = None  # Changed to Optional, will be set by trainer
     use_tqdm: bool = True
+    
+    # PAG Integration
+    use_dense_pag: bool = True  # Enable dense PAG feature extraction
+    pag_fallback_to_python: bool = True  # Fallback to Python PAG if Rust fails
     
     # MCTS parameters - MUCH more aggressive exploration
     c_puct: float = 4.0  # Increased from 3.0 to encourage more exploration
@@ -206,7 +210,7 @@ class SelfPlayGenerator:
     def _apply_forward_progress_bonus(self, board: chess.Board, value: float) -> float:
         """Apply enhanced bonus for pawn advancement and piece development."""
         bonus = 0.0
-        move_count = board.fullmove_number()
+        move_count = board.fullmove_number
         
         # Pawn advancement bonus (stronger in opening)
         if move_count <= 20:  # Extended from 10 to 20 moves
@@ -318,6 +322,22 @@ class SelfPlay:
         self.model = model.to(config.device)
         self.config = config
         self.device = config.device
+        
+        # Initialize PAG engine if enabled
+        self.pag_engine = None
+        if config.use_dense_pag:
+            try:
+                # Import the PAG engine from Rust bindings
+                import rival_ai_engine as engine
+                self.pag_engine = engine.PyPAGEngine()
+                logger.info("✅ Dense PAG engine initialized for self-play")
+            except Exception as e:
+                if config.pag_fallback_to_python:
+                    logger.warning(f"⚠️ Failed to initialize Rust PAG engine ({e}), falling back to Python PAG")
+                    self.pag_engine = None
+                else:
+                    logger.error(f"❌ Failed to initialize PAG engine: {e}")
+                    raise
         
         # Create MCTS config
         self.mcts_config = MCTSConfig(
@@ -876,125 +896,125 @@ class SelfPlay:
         return False
 
     def play_game(self) -> GameRecord:
-        """Play a single game of self-play."""
+        """Play a single self-play game.
+        
+        Returns:
+            GameRecord containing the game data
+        """
+        # Initialize board
         board = chess.Board()
         game_record = GameRecord()
-        game_record.moves = []
-        game_record.result = None
-        game_record.metadata = {
-            'num_simulations': self.config.num_simulations,
-            'c_puct': self.config.c_puct,
-            'temperature': self.config.temperature,
-            'dirichlet_alpha': self.config.dirichlet_alpha,
-            'dirichlet_weight': self.config.dirichlet_weight
-        }
         
-        # Initialize MCTS for this game
-        mcts = MCTS(
-            model=self.model,
-            config=self.mcts_config
-        )
-        
-        # Track positions for repetition detection
-        position_history = []
+        # Initialize timing
+        start_time = time.time()
         move_count = 0
+        total_mcts_time = 0.0
         
+        # Game loop
         while not board.is_game_over() and move_count < self.config.max_moves:
             try:
-                # Get current position value
-                position_value = mcts._get_value(board)
+                # Record current state
+                game_record.add_state(board.copy())
                 
-                # Apply repetition penalty
-                position_value = self._apply_repetition_penalty(board, position_value, 0)  # Using game index 0 for single game
+                # Extract PAG features for current position
+                pag_features = None
+                if self.config.use_dense_pag:
+                    pag_features = self._extract_pag_features(board)
                 
-                # Apply forward progress bonus
-                position_value = self._apply_forward_progress_bonus(board, position_value)
+                # MCTS search with timing
+                mcts_start = time.time()
                 
-                # Apply material evaluation
-                position_value = self._apply_material_evaluation(board, position_value)
+                # Get policy and value from MCTS
+                policy, value = self.mcts.get_action_probs(board)
                 
-                # Apply capture encouragement
-                position_value = self._apply_capture_encouragement(board, position_value)
+                mcts_time = time.time() - mcts_start
+                total_mcts_time += mcts_time
                 
-                # Apply obvious capture bonus (very strong for good captures)
-                position_value = self._apply_obvious_capture_bonus(board, position_value)
+                # Apply enhanced bonuses and penalties
+                value = self._apply_material_evaluation(board, value)
+                value = self._apply_capture_encouragement(board, value)
+                value = self._apply_obvious_capture_bonus(board, value)
+                value = self._apply_repetition_penalty(board, value, self.game_counter)
+                value = self._apply_forward_progress_bonus(board, value)
                 
-                # Apply aggressive play bonuses
-                policy_tensor = torch.tensor(position_value, dtype=torch.float32, device=self.device)
-                move_count = len(game_record.moves)
-                policy_tensor = self._apply_aggressive_play_bonus(board, policy_tensor, move_count)
-                policy_tensor = self._force_decisive_play(board, policy_tensor, move_count)
+                # Apply aggressive play bonuses to policy
+                policy = self._apply_aggressive_play_bonus(board, policy, move_count)
                 
-                # Convert back to numpy
-                policy = policy_tensor.detach().cpu().numpy()
+                # Force decisive play based on move count
+                policy = self._force_decisive_play(board, policy, move_count)
                 
-                # Update move probabilities with bonuses
-                for move in legal_moves:
-                    move_idx = self.mcts._move_to_move_idx(move)
-                    if move_idx is not None and 0 <= move_idx < 5312:
-                        move_probs[move] = float(policy[move_idx])
+                # Temperature-based move selection with dynamic temperature
+                temperature = self._get_dynamic_temperature(move_count)
                 
-                # Apply softmax to get valid probabilities
-                moves = list(move_probs.keys())
-                logits = np.array([move_probs[move] for move in moves])
+                # Make random move if configured
+                if self._should_make_random_move(board, move_count):
+                    selected_move = self._get_random_move(board)
+                    if selected_move is None:
+                        # If random move selection fails, fall back to policy
+                        selected_move = self._select_move_from_policy(board, policy, temperature)
+                else:
+                    selected_move = self._select_move_from_policy(board, policy, temperature)
                 
-                # Apply temperature before softmax (much higher temperature for more variety)
-                current_temperature = self._get_dynamic_temperature(move_count)
-                if current_temperature != 1.0:
-                    logits = logits / current_temperature
+                if selected_move is None:
+                    logger.warning("No valid move found, ending game")
+                    break
                 
-                # Compute softmax
-                exp_logits = np.exp(logits - np.max(logits))
-                probs = exp_logits / exp_logits.sum()
+                # Record move with PAG features
+                game_record.add_move(
+                    move=selected_move,
+                    policy=policy,
+                    value=value,
+                    pag_features=pag_features  # Include PAG features in game record
+                )
                 
-                # Update move probabilities
-                move_probs = {move: float(prob) for move, prob in zip(moves, probs)}
-                
-                # Sample move
-                move_idx = np.random.choice(len(moves), p=probs)
-                selected_move = moves[move_idx]
-                
-                # Record move, policy, and value
-                policy_array = np.zeros(5312, dtype=np.float32)
-                for move, prob in move_probs.items():
-                    move_idx = self.mcts._move_to_move_idx(move)
-                    if move_idx is not None and 0 <= move_idx < 5312:
-                        policy_array[move_idx] = prob
-                
-                policy_tensor = torch.tensor(policy_array, dtype=torch.float32)
-                game_record.add_move(selected_move, policy=policy_tensor, value=float(position_value))
-                
-                # Make move
+                # Make the move
                 board.push(selected_move)
                 move_count += 1
                 
-                # Track position for repetition detection
-                position_key = self._get_position_key(board)
-                position_history.append(position_key)
-                
+                # Check dynamic move limit
+                if self._apply_dynamic_move_limit(board, move_count):
+                    logger.info(f"Dynamic move limit reached at move {move_count}")
+                    break
+                    
             except Exception as e:
-                logger.error(f"Error during game play: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                logger.error(f"Board state: {board.fen()}")
-                logger.error(f"Move count: {move_count}")
-                raise
+                logger.error(f"Error during move {move_count}: {e}")
+                logger.error(traceback.format_exc())
+                break
         
-        # Record game result
-        if board.is_checkmate():
-            game_record.result = GameResult.BLACK_WINS if board.turn else GameResult.WHITE_WINS
-        elif board.is_stalemate():
-            game_record.result = GameResult.DRAW
-        elif board.is_insufficient_material():
-            game_record.result = GameResult.DRAW
-        elif board.is_fifty_moves():
-            game_record.result = GameResult.DRAW
-        elif board.is_repetition():
-            game_record.result = GameResult.DRAW
-        elif move_count >= self.config.max_moves:
-            game_record.result = GameResult.DRAW
+        # Record final state
+        game_record.add_state(board.copy())
+        
+        # Set game result
+        if board.is_game_over():
+            result = board.result()
+            if result == "1-0":
+                game_record.set_result(GameResult.WHITE_WINS)
+            elif result == "0-1":
+                game_record.set_result(GameResult.BLACK_WINS)
+            else:
+                game_record.set_result(GameResult.DRAW)
         else:
-            game_record.result = GameResult.DRAW  # Default to draw for any other case
+            # Game ended due to move limit
+            game_record.set_result(GameResult.DRAW)
+        
+        # Log game statistics
+        game_time = time.time() - start_time
+        self.timing_metrics['total_time'] += game_time
+        self.timing_metrics['num_games'] = self.timing_metrics.get('num_games', 0) + 1
+        
+        # Update metrics
+        self.metrics['game_length'].append(move_count)
+        self.metrics['game_time'].append(game_time)
+        self.metrics['mcts_time'].append(total_mcts_time)
+        self.metrics['avg_mcts_time_per_move'].append(total_mcts_time / max(1, move_count))
+        
+        # Increment game counter
+        self.game_counter += 1
+        
+        # Log PAG usage statistics
+        if self.config.use_dense_pag:
+            pag_positions = sum(1 for move_data in game_record.moves if hasattr(move_data, 'pag_features') and move_data.pag_features is not None)
+            logger.debug(f"Game {self.game_counter}: {pag_positions}/{move_count} positions with PAG features")
         
         return game_record
     
@@ -1311,6 +1331,138 @@ class SelfPlay:
         # We'll use a simple approach - check if the position exists in recent history
         # For now, we'll use the board's built-in repetition detection
         return test_board.is_repetition()
+
+    def _extract_pag_features(self, board: chess.Board) -> Optional[torch.Tensor]:
+        """Extract PAG features for the current position.
+        
+        Args:
+            board: Chess board position
+            
+        Returns:
+            PAG feature tensor or None if extraction fails
+        """
+        if not self.config.use_dense_pag or self.pag_engine is None:
+            return None
+            
+        try:
+            # Convert board to FEN
+            fen = board.fen()
+            
+            # Extract dense PAG features using Rust engine
+            pag_data = self.pag_engine.fen_to_dense_pag(fen)
+            
+            # Extract relevant features and convert to tensor
+            if 'piece_features' in pag_data and 'square_features' in pag_data:
+                piece_features = torch.tensor(pag_data['piece_features'], dtype=torch.float32)
+                square_features = torch.tensor(pag_data['square_features'], dtype=torch.float32)
+                
+                # Combine piece and square features
+                # This creates a comprehensive position representation
+                all_features = torch.cat([
+                    piece_features.flatten(),
+                    square_features.flatten()
+                ], dim=0)
+                
+                return all_features.to(self.device)
+            
+        except Exception as e:
+            if self.config.pag_fallback_to_python:
+                logger.debug(f"PAG extraction failed, using fallback: {e}")
+                # Fallback to Python PAG implementation
+                try:
+                    from rival_ai.pag import PositionalAdjacencyGraph, PAGConfig
+                    pag_config = PAGConfig()
+                    pag = PositionalAdjacencyGraph(pag_config)
+                    pag.build_from_board(board)
+                    hetero_data = pag.to_hetero_data()
+                    
+                    # Extract features from hetero data
+                    if 'piece' in hetero_data and hasattr(hetero_data['piece'], 'x'):
+                        return hetero_data['piece'].x.flatten().to(self.device)
+                    
+                except Exception as fallback_e:
+                    logger.warning(f"Both Rust and Python PAG extraction failed: {e}, {fallback_e}")
+            else:
+                logger.warning(f"PAG feature extraction failed: {e}")
+        
+        return None
+
+    def _select_move_from_policy(self, board: chess.Board, policy: torch.Tensor, temperature: float) -> Optional[chess.Move]:
+        """Select a move from the policy distribution.
+        
+        Args:
+            board: Current chess board
+            policy: Policy tensor with move probabilities
+            temperature: Temperature for move selection
+            
+        Returns:
+            Selected chess move or None if no valid move
+        """
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            return None
+        
+        legal_indices = []
+        legal_probs = []
+        
+        for move in legal_moves:
+            # Convert move to policy index using FIXED compact encoding
+            if move.promotion:
+                # Use the same compact encoding as training_types.py
+                piece_type = {
+                    chess.KNIGHT: 0,
+                    chess.BISHOP: 1, 
+                    chess.ROOK: 2,
+                    chess.QUEEN: 3
+                }.get(move.promotion, 3)
+                
+                from_file = move.from_square % 8
+                from_rank = move.from_square // 8
+                to_file = move.to_square % 8
+                to_rank = move.to_square // 8
+                
+                if to_file == from_file:
+                    direction = 0
+                elif to_file == from_file - 1:
+                    direction = 1
+                elif to_file == from_file + 1:
+                    direction = 2
+                else:
+                    continue  # Skip invalid promotion
+                
+                if from_rank == 6 and to_rank == 7:
+                    side_offset = 0
+                elif from_rank == 1 and to_rank == 0:
+                    side_offset = 96
+                else:
+                    continue  # Skip invalid promotion
+                
+                move_idx = 4096 + side_offset + (from_file * 12) + (direction * 4) + piece_type
+            else:
+                move_idx = move.from_square * 64 + move.to_square
+            
+            if 0 <= move_idx < len(policy):
+                legal_indices.append(move_idx)
+                legal_probs.append(float(policy[move_idx]))
+        
+        if not legal_probs:
+            # Fallback to random legal move
+            return legal_moves[0]
+        
+        # Apply temperature
+        if temperature > 0:
+            probs = np.array(legal_probs)
+            if temperature != 1.0:
+                probs = probs ** (1.0 / temperature)
+            probs = probs / probs.sum()
+            
+            # Sample move
+            selected_idx = np.random.choice(len(legal_indices), p=probs)
+        else:
+            # Greedy selection
+            selected_idx = np.argmax(legal_probs)
+        
+        return legal_moves[selected_idx]
 
 def generate_game(model: ChessGNN, config: SelfPlayConfig) -> GameRecord:
     """Generate a single game of self-play.

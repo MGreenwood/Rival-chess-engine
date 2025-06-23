@@ -58,20 +58,66 @@ impl ModelBridge {
         let promotion = mv.get_promotion();
         
         if let Some(promotion) = promotion {
-            // Promotion moves are encoded after regular moves
-            // Formula: 4096 + (from_square * 64 + to_square) * 4 + promotion_piece_type - 1
-            let piece_offset = match promotion {
-                chess::Piece::Knight => 0,  // promotion = 1, so 1-1 = 0
-                chess::Piece::Bishop => 1,  // promotion = 2, so 2-1 = 1
-                chess::Piece::Rook => 2,    // promotion = 3, so 3-1 = 2
-                chess::Piece::Queen => 3,   // promotion = 4, so 4-1 = 3
+            // 🔥 FIXED PROMOTION ENCODING 🔥
+            // The old formula (from * 64 + to) * 4 produces indices up to 16,380
+            // But we only have 1216 promotion slots (4096-5311)
+            // Use compact encoding that fits in available space
+            
+            let promotion_piece_type = match promotion {
+                chess::Piece::Knight => 0,  // 0-based for compact encoding
+                chess::Piece::Bishop => 1,
+                chess::Piece::Rook => 2,
+                chess::Piece::Queen => 3,
                 _ => return None,
             };
-            let base = 4096 + (from * 64 + to) * 4;
-            Some(base + piece_offset)
+            
+            // Extract file and rank information
+            let from_file = from % 8;
+            let from_rank = from / 8;
+            let to_file = to % 8;
+            let to_rank = to / 8;
+            
+            // Determine promotion direction
+            let direction = if to_file == from_file {
+                0  // Straight promotion
+            } else if to_file == from_file.wrapping_sub(1) {
+                1  // Capture left
+            } else if to_file == from_file + 1 {
+                2  // Capture right
+            } else {
+                return None;  // Invalid promotion
+            };
+            
+            // Determine side (White or Black promotion)
+            let side_offset = if from_rank == 6 && to_rank == 7 {
+                0    // White promotion (rank 7 to 8)
+            } else if from_rank == 1 && to_rank == 0 {
+                96   // Black promotion (rank 2 to 1) - 8 files * 3 directions * 4 pieces = 96
+            } else {
+                return None;  // Invalid promotion ranks
+            };
+            
+            // Compact index calculation
+            // Each file gets 12 indices (3 directions * 4 pieces)
+            // Format: 4096 + side_offset + (file * 12) + (direction * 4) + piece_type
+            let index = 4096 + side_offset + (from_file * 12) + (direction * 4) + promotion_piece_type;
+            
+            // Ensure the index is within bounds (should always be true with this encoding)
+            if index < 5312 {
+                Some(index)
+            } else {
+                None  // Safety check
+            }
         } else {
             // Regular moves are encoded as from * 64 + to
-            Some(from * 64 + to)
+            let index = from * 64 + to;
+            
+            // Ensure the index is within bounds
+            if index < 4096 {
+                Some(index)
+            } else {
+                None
+            }
         }
     }
 }

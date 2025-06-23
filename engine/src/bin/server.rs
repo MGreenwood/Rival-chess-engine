@@ -5,7 +5,7 @@ use actix_cors::Cors;
 use actix_web_actors::ws;
 use actix::{Actor, StreamHandler};
 use serde::{Deserialize, Serialize};
-use rival_ai::engine::Engine;
+use rival_ai_engine::engine::Engine;
 use pyo3::prelude::*;
 use chrono::{DateTime, Utc};
 use chess::{Board as ChessBoard, ChessMove, BoardStatus};
@@ -14,8 +14,8 @@ use clap::Parser;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use rand::{thread_rng, Rng};
-use rival_ai::game_storage::{GameStorage, GameState as StorageGameState, GameMode, GameStatus, GameMetadata};
-use rival_ai::ModelBridge;
+use rival_ai_engine::game_storage::{GameStorage, GameState as StorageGameState, GameMode, GameStatus, GameMetadata};
+use rival_ai_engine::ModelBridge;
 use serde_json::json;
 use std::fs;
 use pyo3::types::PyDict;
@@ -30,13 +30,9 @@ use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey}
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the model checkpoint file for single player games
+    /// Path to the unified model checkpoint file (used by all engines)
     #[arg(short, long, default_value = "../models/latest_trained_model.pt")]
     model_path: String,
-    
-    /// Path to the model checkpoint file for community games
-    #[arg(long, default_value = "../python/experiments/rival_ai_v1_Alice/run_20250619_162208/checkpoints/best_model.pt")]
-    community_model_path: String,
     
     /// Server port
     #[arg(short, long, default_value = "3000")]
@@ -484,7 +480,7 @@ impl CommunityGame {
                 player_name: Some("Community".to_string()),
                 engine_version: "1.0.0".to_string(),
             },
-            board: self.board.to_string(),
+            board: validate_and_fix_fen(&self.board.to_string()),
             move_history: self.move_history.clone(),
             analysis: None,
         };
@@ -530,25 +526,8 @@ pub struct AppState {
 
 impl AppState {
     fn get_experiment_name(&self) -> String {
-        // Extract experiment name from the community model path
-        // Example path: "../python/experiments/rival_ai_v1_Alice/run_20250618_134810/checkpoints/checkpoint_epoch_5.pt"
-        let args = Args::parse();
-        let path = std::path::Path::new(&args.community_model_path);
-        
-        // Try to get the experiment folder name (e.g. "rival_ai_v1_Alice")
-        // Go up: checkpoint_file -> checkpoints -> run_folder -> experiment_folder
-        if let Some(experiment_dir) = path.parent()
-            .and_then(|p| p.parent())  // Go up from checkpoints to run folder
-            .and_then(|p| p.parent())  // Go up from run folder to experiment folder
-        {
-            if let Some(exp_name) = experiment_dir.file_name() {
-                if let Some(name) = exp_name.to_str() {
-                    return name.to_string();
-                }
-            }
-        }
-        
-        "Unknown Model".to_string()
+        // Since we're using a unified model system, return a simple name
+        "Unified RivalAI Model".to_string()
     }
 }
 
@@ -759,7 +738,12 @@ async fn make_move(
         eprintln!("🚫 ==========================================");
         return HttpResponse::BadRequest().json(json!({
             "success": false,
-            "error_message": format!("Illegal move: {}", move_str)
+            "error_message": format!("Illegal move: {}", move_str),
+            "error_type": "desync",
+            "server_board": validate_and_fix_fen(&board.to_string()),
+            "server_move_history": game_state.move_history,
+            "legal_moves": legal_moves.iter().map(|m| m.to_string()).collect::<Vec<_>>(),
+            "requires_sync": true
         }));
     }
 
@@ -776,7 +760,7 @@ async fn make_move(
 
     // Make the player's move (now we know it's legal)
     board = board.make_move_new(player_move);
-    game_state.board = board.to_string();
+    game_state.board = validate_and_fix_fen(&board.to_string());
     game_state.move_history.push(move_str.to_string());
     game_state.metadata.last_move_at = Utc::now();
     game_state.metadata.total_moves += 1;
@@ -826,7 +810,7 @@ async fn make_move(
     if let Some(engine_move) = engine.get_best_move(board.clone()) {
         // Make the engine's move
         board = board.make_move_new(engine_move);
-        game_state.board = board.to_string();
+        game_state.board = validate_and_fix_fen(&board.to_string());
         game_state.move_history.push(engine_move.to_string());
         game_state.metadata.total_moves += 1;
 
@@ -941,7 +925,7 @@ async fn get_game(
         if let Some(game_state) = active_games.get(&game_id) {
             return HttpResponse::Ok().json(WebGameState {
                 game_id: game_state.metadata.game_id.clone(),
-                board: game_state.board.clone(),
+                board: validate_and_fix_fen(&game_state.board),
                 status: game_state.metadata.status.to_string(),
                 move_history: game_state.move_history.clone(),
                 is_player_turn: true,
@@ -953,7 +937,7 @@ async fn get_game(
     match data.game_storage.load_game(&game_id, &GameMode::SinglePlayer) {
         Ok(game) => HttpResponse::Ok().json(WebGameState {
             game_id: game.metadata.game_id,
-            board: game.board,
+            board: validate_and_fix_fen(&game.board),
             status: game.metadata.status.to_string(),
             move_history: game.move_history,
             is_player_turn: true,
@@ -1270,7 +1254,7 @@ async fn start_community_game(
     
     let response = CommunityGameStateResponse {
         game_id: "community".to_string(),
-        board: game.board.to_string(),
+        board: validate_and_fix_fen(&game.board.to_string()),
         status: game.status.to_string(),
         move_history: game.move_history.clone(),
         is_voting_phase: game.is_voting_phase(),
@@ -1310,7 +1294,7 @@ async fn get_community_game_state(
 
     HttpResponse::Ok().json(CommunityGameStateResponse {
         game_id: "community".to_string(),
-        board: game.board.to_string(),
+        board: validate_and_fix_fen(&game.board.to_string()),
         status: game.status.to_string(),
         move_history: game.move_history.clone(),
         is_voting_phase: game.is_voting_phase(),
@@ -1478,7 +1462,7 @@ async fn vote_move(
             error_message: None,
             game_state: CommunityGameStateResponse {
                 game_id: "community".to_string(),
-                board: game.board.to_string(),
+                board: validate_and_fix_fen(&game.board.to_string()),
                 status: game.status.to_string(),
                 move_history: game.move_history.clone(),
                 is_voting_phase: game.is_voting_phase(),
@@ -1510,7 +1494,7 @@ async fn vote_move(
                 error_message: None,
                 game_state: CommunityGameStateResponse {
                     game_id: "community".to_string(),
-                    board: game.board.to_string(),
+                    board: validate_and_fix_fen(&game.board.to_string()),
                     status: game.status.to_string(),
                     move_history: game.move_history.clone(),
                     is_voting_phase: game.is_voting_phase(),
@@ -1542,7 +1526,7 @@ async fn get_game_state(data: web::Data<AppState>) -> impl Responder {
     let game = recover_mutex(data.game.lock());
     
     web::Json(json!({
-        "board": game.board.to_string(),
+        "board": validate_and_fix_fen(&game.board.to_string()),
         "move_history": game.move_history,
         "is_voting_phase": game.is_voting_phase(),
         "status": game.status,
@@ -1804,16 +1788,16 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
     single_player_stats.gpu_utilization = gpu_util;
     community_stats.gpu_utilization = gpu_util;
     
-    // Get unprocessed games count for training progress
-    let unprocessed_games = match count_unprocessed_games(&args.games_dir).await {
+    // Get training-ready games count for training progress
+    let training_ready_games = match count_training_ready_games(&args.games_dir).await {
         Ok(count) => count,
         Err(_) => 0, // Fall back to 0 if counting fails
     };
     
-    single_player_stats.games_until_training = if unprocessed_games >= args.training_games_threshold {
+    single_player_stats.games_until_training = if training_ready_games >= args.training_games_threshold {
         0
     } else {
-        args.training_games_threshold - unprocessed_games
+        args.training_games_threshold - training_ready_games
     };
     
     // Store in cache
@@ -1822,7 +1806,7 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
         community_model: community_stats.clone(),
         active_players: data.active_players.load(Ordering::SeqCst),
         self_play_games: data.self_play_games.load(Ordering::SeqCst),
-        unprocessed_games_count: unprocessed_games,
+        unprocessed_games_count: training_ready_games,
         total_games_count: current_games.len(), // This is now just unarchived games
     };
     
@@ -2109,22 +2093,22 @@ async fn main() -> std::io::Result<()> {
     let server = Python::with_gil(|py| {
         let torch = PyModule::import(py, "torch").unwrap();
         
-        // Create single player engine with ultra-dense PAG (stronger with master analysis)
+        // Create engines using the same unified model (load twice for separate instances)
+        println!("🎮 Loading model for single-player engine...");
         let single_player_model = create_model_with_device(py, &torch, &args.model_path)
             .unwrap_or_else(|e| {
-                eprintln!("❌ Failed to load single player ultra-dense model: {}", e);
-                eprintln!("🔄 Creating ultra-dense fallback model...");
+                eprintln!("❌ Failed to load unified model for single-player: {}", e);
+                eprintln!("🔄 Creating fallback model...");
                 
                 // Create proper fallback model instead of None
                 let fallback_code = r#"
-class UltraDenseFallbackModel:
+class UnifiedFallbackModel:
     def __init__(self):
         self.device = 'cpu'
-        print("⚠️ Using ultra-dense fallback model (uniform policy)")
-        print("🧠 Fallback still processes ~340,000 features per position")
+        print("⚠️ Using unified fallback model (uniform policy)")
     
     def predict_with_board(self, board_fen):
-        # Fallback uniform policy for ultra-dense system
+        # Fallback uniform policy
         return ([1.0/5312] * 5312, 0.0)
     
     def eval(self):
@@ -2132,33 +2116,28 @@ class UltraDenseFallbackModel:
     
     def to(self, device):
         self.device = device
-        print(f"🔧 Ultra-dense fallback moved to {device}")
+        print(f"🔧 Unified fallback moved to {device}")
         return self
 "#;
                 let fallback_locals = PyDict::new(py);
                 py.run(fallback_code, Some(fallback_locals), None).unwrap();
-                let fallback_model = py.eval("UltraDenseFallbackModel()", Some(fallback_locals), None).unwrap();
+                let fallback_model = py.eval("UnifiedFallbackModel()", Some(fallback_locals), None).unwrap();
                 ModelBridge::new(fallback_model.into_py(py), Some("cpu".to_string()))
             });
 
-        let single_player_engine = Engine::new_with_model(single_player_model);
-
-        // Create community engine with ultra-dense PAG + MCTS (strongest possible for the challenge)
-        let community_model = create_model_with_device(py, &torch, &args.community_model_path)
+        println!("🏆 Loading model for community engine...");
+        let community_model = create_model_with_device(py, &torch, &args.model_path)
             .unwrap_or_else(|e| {
-                eprintln!("❌ Failed to load community ultra-dense model: {}", e);
-                eprintln!("🔄 Creating ultra-dense fallback model...");
+                eprintln!("❌ Failed to load unified model for community: {}", e);
+                eprintln!("🔄 Creating fallback model...");
                 
-                // Create proper fallback model instead of None
                 let fallback_code = r#"
-class UltraDenseFallbackModel:
+class UnifiedFallbackModel:
     def __init__(self):
         self.device = 'cpu'
-        print("⚠️ Using ultra-dense fallback model (uniform policy)")
-        print("🧠 Fallback still processes ~340,000 features per position")
+        print("⚠️ Using unified fallback model (uniform policy)")
     
     def predict_with_board(self, board_fen):
-        # Fallback uniform policy for ultra-dense system
         return ([1.0/5312] * 5312, 0.0)
     
     def eval(self):
@@ -2166,15 +2145,16 @@ class UltraDenseFallbackModel:
     
     def to(self, device):
         self.device = device
-        print(f"🔧 Ultra-dense fallback moved to {device}")
+        print(f"🔧 Unified fallback moved to {device}")
         return self
 "#;
                 let fallback_locals = PyDict::new(py);
                 py.run(fallback_code, Some(fallback_locals), None).unwrap();
-                let fallback_model = py.eval("UltraDenseFallbackModel()", Some(fallback_locals), None).unwrap();
+                let fallback_model = py.eval("UnifiedFallbackModel()", Some(fallback_locals), None).unwrap();
                 ModelBridge::new(fallback_model.into_py(py), Some("cpu".to_string()))
             });
-
+        
+        let single_player_engine = Engine::new_with_model(single_player_model);
         let community_engine = Engine::new_with_mcts(community_model);
 
         let game_storage = Arc::new(GameStorage::new(&args.games_dir).unwrap());
@@ -2278,26 +2258,58 @@ class UltraDenseFallbackModel:
         println!("💾 Game persistence: Stats survive server restarts, games archived after training");
         println!("Games directory: {}", args.games_dir);
 
+        // Test promotion handling immediately
+        println!("🔥 Testing promotion handling...");
+        Python::with_gil(|py| {
+            // Use a more realistic promotion position: pawn on 7th rank with kings
+            let test_position = "8/P6k/8/8/8/8/8/K7 w - - 0 1"; // White pawn on a7, kings present
+            println!("   Test position: {} (white pawn ready to promote)", test_position);
+            
+            let torch = PyModule::import(py, "torch").unwrap();
+            let test_model = create_model_with_device(py, &torch, &args.model_path).unwrap();
+            let test_engine = Engine::new_with_model(test_model);
+            
+            if let Ok(board) = chess::Board::from_str(test_position) {
+                println!("   🔍 Asking model about promotion position...");
+                if let Some(_mv) = test_engine.get_best_move(board) {
+                    println!("   ✅ Promotion test completed - check debug output above");
+                } else {
+                    println!("   ❌ Model returned no move for promotion position!");
+                }
+            } else {
+                println!("   ❌ Invalid test position - trying simpler test...");
+                // Fallback: just test that the engine works with starting position
+                if let Ok(start_board) = chess::Board::from_str("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") {
+                    println!("   🔍 Testing engine with starting position...");
+                    if let Some(_mv) = test_engine.get_best_move(start_board) {
+                        println!("   ✅ Engine working correctly");
+                    } else {
+                        println!("   ❌ Engine failed on starting position!");
+                    }
+                }
+            }
+        });
+
         // Start server
-        println!("🚀 Starting Ultra-Dense PAG Chess AI Server on {}:{}", args.host, args.port);
-        println!("🧠 REVOLUTIONARY SYSTEM ACTIVE:");
-        println!("   💎 Ultra-Dense PAG Feature Extraction: ~340,000 features per position");
-        println!("   🎯 Master-level tactical analysis built into neural network input");
-        println!("   ⚡ 10-100x faster than Python with Rust implementation");
-        println!("   🏆 From basic features to chess master expertise");
+        println!("🚀 Starting Unified Chess AI Server on {}:{}", args.host, args.port);
+        println!("🎯 UNIFIED SYSTEM ACTIVE:");
+        println!("   🧠 One Model: All engines use {}", args.model_path);
+        println!("   📦 Unified Storage: All games → batched training format");
+        println!("   🔄 Auto-Training: Games → Batches → Training → New Model → Reload");
+        println!("   ⚡ Streamlined: No more file mess or duplicate models");
         println!("");
         println!("🎮 Engine Configuration:");
-        println!("   Single-player: Ultra-Dense Direct Policy (fast + master analysis)");
-        println!("   Community: Ultra-Dense MCTS 2000 sims (strongest possible challenge)"); 
-        println!("   Feature density: Basic ~100 → Ultra-Dense ~340,000");
+        println!("   Single-player: Direct Policy (fast)");
+        println!("   Community: MCTS (stronger for challenge)"); 
+        println!("   Model: SAME for both engines");
         println!("");
         println!("🎮 Self-play configuration:");
         println!("   📊 Initial games: {}", args.initial_self_play_games);
         println!("   📈 Max games (low traffic): {}", args.max_self_play_games);
         println!("   🎯 Target GPU utilization: {:.1}%", args.target_gpu_utilization * 100.0);
         println!("   🔄 Scaling: Aggressive when 0 players, conservative with traffic");
-        println!("   🧠 All games use ultra-dense master-level analysis");
-        
+        println!("   📦 Output: Unified batched storage");
+
         app_state
     });
 
@@ -2334,6 +2346,7 @@ class UltraDenseFallbackModel:
             .service(web::resource("/api/community/start").route(web::post().to(start_community_game)))
             .service(web::resource("/api/community/start-voting").route(web::post().to(start_voting_round)))
             .service(web::resource("/api/community/force-resolve").route(web::post().to(force_resolve_voting)))
+            .service(web::resource("/api/game/sync/{game_id}").route(web::get().to(sync_game_state)))
             .service(web::resource("/games").route(web::get().to(list_games)))
             .service(web::resource("/recent-games").route(web::get().to(get_recent_games)))
             .service(web::resource("/games/{id}").route(web::get().to(get_game)))
@@ -2545,16 +2558,16 @@ async fn background_training_task(
         tokio::task::yield_now().await;
         sleep(Duration::from_secs(60)).await;
         
-        // Use Python script to count only unprocessed games
-        let unprocessed_games = match count_unprocessed_games(&args.games_dir).await {
+        // Use Python script to count only training-ready games
+        let training_ready_games = match count_training_ready_games(&args.games_dir).await {
             Ok(count) => count,
             Err(e) => {
-                eprintln!("Failed to count unprocessed games: {}", e);
+                eprintln!("Failed to count training-ready games: {}", e);
                 continue;
             }
         };
         
-        if unprocessed_games >= args.training_games_threshold && unprocessed_games > last_training_games {
+        if training_ready_games >= args.training_games_threshold && training_ready_games > last_training_games {
             // Check if community engine is busy before starting training (PRIORITY CHECK)
             let community_busy = {
                 if let Ok(game) = data.game.try_lock() {
@@ -2589,11 +2602,11 @@ async fn background_training_task(
             let prev_self_play = data.self_play_games.load(Ordering::SeqCst);
             data.self_play_games.store(1, Ordering::SeqCst);
             
-            eprintln!("🎓 Starting training on {} unprocessed games...", unprocessed_games);
+            eprintln!("🎓 Starting training on {} training-ready games...", training_ready_games);
             eprintln!("🛡️ Community engine protection active during training");
             
             // Actually run training (now non-blocking)
-            match run_training_session(&args, unprocessed_games).await {
+            match run_training_session(&args, training_ready_games).await {
                 Ok(new_model_path) => {
                     eprintln!("✅ Training completed successfully! New model: {}", new_model_path);
                     eprintln!("📦 Processed games have been archived to prevent retraining");
@@ -2610,7 +2623,7 @@ async fn background_training_task(
                         }
                     }
                     
-                    last_training_games = unprocessed_games;
+                    last_training_games = training_ready_games;
                 },
                 Err(e) => {
                     eprintln!("❌ Training failed: {}", e);
@@ -2622,14 +2635,14 @@ async fn background_training_task(
             data.self_play_games.store(prev_self_play, Ordering::SeqCst);
             data.is_training.store(false, Ordering::SeqCst);
             eprintln!("🔄 Training completed - self-play scaling resumed");
-        } else if unprocessed_games > 0 {
+        } else if training_ready_games > 0 {
             // Training status available via API endpoint - no need for verbose logging
         }
     }
 }
 
-// Add function to count unprocessed games using Python script
-async fn count_unprocessed_games(games_dir: &str) -> Result<usize, String> {
+// Add function to count training-ready games using Python script
+async fn count_training_ready_games(games_dir: &str) -> Result<usize, String> {
     use std::process::Command;
     
     let output = Command::new("python")
@@ -2638,9 +2651,9 @@ async fn count_unprocessed_games(games_dir: &str) -> Result<usize, String> {
 import sys
 sys.path.insert(0, '../python/src')
 sys.path.insert(0, '../python/scripts')
-from server_training import ServerTrainingRunner
-runner = ServerTrainingRunner('{}', '', 0)
-print(runner.count_unprocessed_games())
+from server_training import UnifiedServerTrainingRunner
+runner = UnifiedServerTrainingRunner('{}', '', 0, False, True)
+print(runner.count_training_ready_games())
 "#, games_dir))
         .output()
         .map_err(|e| format!("Failed to execute Python script: {}", e))?;
@@ -2726,6 +2739,7 @@ async fn run_training_session(args: &Args, _num_games: usize) -> Result<String, 
         .arg("--threshold")
         .arg(args.training_games_threshold.to_string())
         .arg("--low-priority")  // Add flag for lower GPU priority
+        .arg("--delete-after-training")  // DELETE game files after training to save space
         .kill_on_drop(true);  // Kill if server shuts down
     
     if args.tensorboard {
@@ -2759,7 +2773,7 @@ async fn background_self_play_task(
     args: Args,
 ) {
     let target_gpu_util = args.target_gpu_utilization;  // Use configurable target
-    let min_self_play = 1;
+    let min_self_play = 20;
     let max_self_play = args.max_self_play_games;     // Use configurable max
     let generation_interval = 120;
     
@@ -2968,7 +2982,7 @@ async fn start_voting_round(
         error_message: None,
         game_state: CommunityGameStateResponse {
             game_id: "community".to_string(),
-            board: game.board.to_string(),
+            board: validate_and_fix_fen(&game.board.to_string()),
             status: game.status.to_string(),
             move_history: game.move_history.clone(),
             is_voting_phase: game.is_voting_phase(),
@@ -3030,7 +3044,7 @@ async fn force_resolve_voting(
                 error_message: None,
                 game_state: CommunityGameStateResponse {
                     game_id: "community".to_string(),
-                    board: game.board.to_string(),
+                    board: validate_and_fix_fen(&game.board.to_string()),
                     status: game.status.to_string(),
                     move_history: game.move_history.clone(),
                     is_voting_phase: game.is_voting_phase(),
@@ -3115,6 +3129,71 @@ async fn reload_engine_model(data: &web::Data<AppState>, new_model_path: &str) -
     Ok(())
 }
 
+async fn sync_game_state(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let game_id = path.into_inner();
+    
+    eprintln!("🔄 Sync request for game: {}", game_id);
+    
+    // Try active games first (most common case)
+    {
+        let active_games = recover_mutex(data.active_games.lock());
+        if let Some(game_state) = active_games.get(&game_id) {
+            eprintln!("✅ Found game {} in active games", game_id);
+            return HttpResponse::Ok().json(json!({
+                "success": true,
+                "source": "active",
+                "game": {
+                    "game_id": game_state.metadata.game_id,
+                    "board": game_state.board,
+                    "status": game_state.metadata.status.to_string(),
+                    "move_history": game_state.move_history,
+                    "is_player_turn": true,
+                    "metadata": {
+                        "game_id": game_state.metadata.game_id,
+                        "status": game_state.metadata.status.to_string(),
+                        "total_moves": game_state.metadata.total_moves,
+                        "last_move_at": game_state.metadata.last_move_at.to_rfc3339(),
+                    }
+                }
+            }));
+        }
+    }
+    
+    // Try persistent storage
+    match data.game_storage.load_game(&game_id, &GameMode::SinglePlayer) {
+        Ok(game_state) => {
+            eprintln!("✅ Found game {} in persistent storage", game_id);
+            HttpResponse::Ok().json(json!({
+                "success": true,
+                "source": "storage",
+                "game": {
+                    "game_id": game_state.metadata.game_id,
+                    "board": game_state.board,
+                    "status": game_state.metadata.status.to_string(),
+                    "move_history": game_state.move_history,
+                    "is_player_turn": true,
+                    "metadata": {
+                        "game_id": game_state.metadata.game_id,
+                        "status": game_state.metadata.status.to_string(),
+                        "total_moves": game_state.metadata.total_moves,
+                        "last_move_at": game_state.metadata.last_move_at.to_rfc3339(),
+                    }
+                }
+            }))
+        }
+        Err(e) => {
+            eprintln!("❌ Game {} not found: {}", game_id, e);
+            HttpResponse::NotFound().json(json!({
+                "success": false,
+                "error": format!("Game not found: {}", e)
+            }))
+        }
+    }
+}
+
 // Helper function to update cache when community games complete
 fn update_stats_cache_for_community_game(data: &web::Data<AppState>, game: &CommunityGame) {
     // Only update cache if the game has actually ended
@@ -3137,4 +3216,47 @@ fn update_stats_cache_for_community_game(data: &web::Data<AppState>, game: &Comm
         
         update_stats_cache_for_completed_game(data, &metadata);
     }
+}
+
+// Add this helper function to validate and fix FEN strings
+fn validate_and_fix_fen(fen: &str) -> String {
+    // Split FEN into parts: piece_placement active_color castling_availability en_passant halfmove_clock fullmove_number
+    let parts: Vec<&str> = fen.split_whitespace().collect();
+    
+    if parts.len() != 6 {
+        eprintln!("⚠️  Invalid FEN format: {} (wrong number of parts)", fen);
+        return "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string();
+    }
+    
+    let piece_placement = parts[0];
+    let active_color = parts[1];
+    let castling = parts[2];  
+    let en_passant = parts[3];
+    let halfmove = parts[4];
+    let fullmove = parts[5];
+    
+    // Validate en-passant square
+    let fixed_en_passant = if en_passant == "-" {
+        "-".to_string()
+    } else {
+        // Check if en-passant square is valid (a-h)(3 or 6)
+        if en_passant.len() == 2 {
+            let file = en_passant.chars().nth(0).unwrap_or('a');
+            let rank = en_passant.chars().nth(1).unwrap_or('1');
+            
+            if file >= 'a' && file <= 'h' && (rank == '3' || rank == '6') {
+                // Valid en-passant square
+                en_passant.to_string()
+            } else {
+                eprintln!("⚠️  Invalid en-passant square '{}' in FEN: {}", en_passant, fen);
+                "-".to_string()
+            }
+        } else {
+            eprintln!("⚠️  Invalid en-passant square format '{}' in FEN: {}", en_passant, fen);
+            "-".to_string()
+        }
+    };
+    
+    // Reconstruct the FEN with fixed en-passant square
+    format!("{} {} {} {} {} {}", piece_placement, active_color, castling, fixed_en_passant, halfmove, fullmove)
 }

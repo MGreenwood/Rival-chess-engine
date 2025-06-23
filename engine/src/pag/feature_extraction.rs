@@ -1169,7 +1169,52 @@ impl FeatureExtractor {
         
         back_rank_score.min(1.0)
     }
-    fn calculate_promotion_score(&self, _board: &Board, _square: Square, _piece: Piece) -> f32 { 0.0 }
+    fn calculate_promotion_score(&self, board: &Board, square: Square, piece: Piece) -> f32 {
+        // Only pawns can promote
+        if piece != Piece::Pawn {
+            return 0.0;
+        }
+        
+        let Some(piece_color) = board.color_on(square) else { return 0.0; };
+        let rank = square.get_rank().to_index();
+        let promotion_rank = if piece_color == Color::White { 7 } else { 0 };
+        let pre_promotion_rank = if piece_color == Color::White { 6 } else { 1 };
+        
+        // High score for pawns that can promote immediately
+        if rank == pre_promotion_rank {
+            // Check if pawn can actually advance to promotion square
+            let promotion_square = Square::make_square(
+                chess::Rank::from_index(promotion_rank),
+                square.get_file()
+            );
+            
+            // If promotion square is empty or can be captured, this is valuable
+            if board.piece_on(promotion_square).is_none() {
+                return 0.9; // Very high value for free promotion
+            } else if let Some(target_piece) = board.piece_on(promotion_square) {
+                if board.color_on(promotion_square) != Some(piece_color) {
+                    // Can capture and promote - extremely valuable
+                    let capture_value = self.get_piece_value_normalized(target_piece);
+                    return 0.8 + capture_value; // Promotion + capture value
+                }
+            }
+        }
+        
+        // Score for pawns advancing toward promotion
+        let distance_to_promotion = if piece_color == Color::White {
+            7 - rank
+        } else {
+            rank
+        };
+        
+        match distance_to_promotion {
+            1 => 0.9, // About to promote
+            2 => 0.6, // Close to promotion  
+            3 => 0.3, // Making progress
+            4 => 0.1, // Still distant
+            _ => 0.0, // Too far away
+        }
+    }
     fn calculate_en_passant_score(&self, _board: &Board, _square: Square, _piece: Piece) -> f32 { 0.0 }
     fn calculate_castling_score(&self, _board: &Board, _square: Square, _piece: Piece) -> f32 { 0.0 }
     fn calculate_stalemate_score(&self, _board: &Board, _square: Square, _piece: Piece) -> f32 { 0.0 }

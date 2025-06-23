@@ -1,5 +1,5 @@
 [package]
-name = "rival_ai"
+name = "rival_ai_engine"
 version = "0.1.0"
 edition = "2021"
 authors = ["RivalAI Contributors"]
@@ -67,7 +67,7 @@ lru = "0.11"  # For caching
 async-trait = "0.1.77"  # For async traits
 
 [lib]
-name = "rival_ai"
+name = "rival_ai_engine"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 

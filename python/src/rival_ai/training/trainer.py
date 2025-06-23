@@ -235,6 +235,225 @@ class Trainer:
             except Exception as e:
                 logger.warning(f"Failed to delete {old_file}: {e}")
 
+    def train_from_unified_storage(self, batch_files: List[Path]) -> str:
+        """Train the model using unified storage batch files.
+        
+        Args:
+            batch_files: List of paths to unified storage batch files
+            
+        Returns:
+            Path to the best trained model
+        """
+        logger.info("Starting training from unified storage...")
+        logger.info(f"Using {len(batch_files)} batch files")
+        
+        # Initialize metrics
+        best_loss = float('inf')
+        metrics_history = []
+        
+        try:
+            # Create experiment-specific directories
+            experiment_dir = Path(self.config.experiment_dir)
+            checkpoints_dir = experiment_dir / 'checkpoints'
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Load and process all training data from batch files
+            all_training_data = []
+            for batch_file in batch_files:
+                try:
+                    import gzip
+                    import json
+                    
+                    with gzip.open(batch_file, 'rt', encoding='utf-8') as f:
+                        batch_data = json.load(f)
+                    
+                    # Extract training positions from all games in this batch
+                    for game_dict in batch_data.get('games', []):
+                        for position in game_dict.get('positions', []):
+                            if position.get('fen') and position.get('policy'):
+                                all_training_data.append({
+                                    'fen': position['fen'],
+                                    'policy': position['policy'],
+                                    'value': position.get('value', 0.0)
+                                })
+                    
+                    logger.info(f"Loaded {len(batch_data.get('games', []))} games from {batch_file.name}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to load batch {batch_file}: {e}")
+                    continue
+            
+            if not all_training_data:
+                raise Exception("No training data loaded from batch files!")
+            
+            logger.info(f"Total training positions: {len(all_training_data)}")
+            
+            # Train for specified number of epochs
+            for epoch in range(self.config.num_epochs):
+                logger.info(f"\nEpoch {epoch + 1}/{self.config.num_epochs}")
+                
+                # Create mini-batches from training data
+                import random
+                random.shuffle(all_training_data)
+                
+                # Process data in mini-batches
+                epoch_loss = 0.0
+                num_batches = 0
+                
+                for i in range(0, len(all_training_data), self.config.batch_size):
+                    batch_data = all_training_data[i:i + self.config.batch_size]
+                    if len(batch_data) < self.config.batch_size // 2:  # Skip small batches
+                        continue
+                    
+                    try:
+                        # Process batch directly without using train_epoch
+                        from rival_ai.utils.board_conversion import board_to_hetero_data
+                        import chess
+                        import torch
+                        
+                        # Convert FEN strings to model input
+                        hetero_data_list = []
+                        policy_targets = []
+                        value_targets = []
+                        
+                        for pos in batch_data:
+                            try:
+                                board = chess.Board(pos['fen'])
+                                hetero_data = board_to_hetero_data(board)
+                                hetero_data_list.append(hetero_data)
+                                policy_targets.append(pos['policy'])
+                                value_targets.append(pos['value'])
+                            except Exception as e:
+                                logger.warning(f"Skipping invalid position: {e}")
+                                continue
+                        
+                        if not hetero_data_list:
+                            continue
+                        
+                        # For now, process one position at a time to avoid batching complexities
+                        batch_loss = 0.0
+                        batch_positions = 0
+                        
+                        for j, (data, policy_target, value_target) in enumerate(zip(hetero_data_list, policy_targets, value_targets)):
+                            try:
+                                # Convert targets to tensors
+                                policy_tensor = torch.tensor(policy_target, dtype=torch.float32).to(self.device)
+                                value_tensor = torch.tensor([value_target], dtype=torch.float32).to(self.device)
+                                
+                                # Forward pass
+                                policy_pred, value_pred = self.model(data)
+                                
+                                # Calculate loss
+                                if self.config.use_improved_loss:
+                                    loss, components = self.criterion(
+                                        policy_pred,
+                                        value_pred,
+                                        policy_tensor.unsqueeze(0),  # Add batch dimension
+                                        value_tensor,
+                                        self.model
+                                    )
+                                else:
+                                    # Simple loss calculation - policy is a probability distribution
+                                    # Apply softmax to policy prediction
+                                    policy_pred_softmax = torch.nn.functional.softmax(policy_pred, dim=-1)
+                                    
+                                    # Use KL divergence loss for policy (probability distributions)
+                                    policy_target_normalized = policy_tensor / (policy_tensor.sum() + 1e-8)
+                                    policy_loss = torch.nn.functional.kl_div(
+                                        torch.log(policy_pred_softmax + 1e-8),
+                                        policy_target_normalized.unsqueeze(0),
+                                        reduction='batchmean'
+                                    )
+                                    
+                                    # MSE loss for value
+                                    value_loss = torch.nn.functional.mse_loss(
+                                        value_pred.squeeze(), value_tensor.squeeze()
+                                    )
+                                    loss = policy_loss + value_loss
+                                
+                                # Backward pass
+                                self.optimizer.zero_grad()
+                                loss.backward()
+                                
+                                # Gradient clipping
+                                if self.config.grad_clip > 0:
+                                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                                
+                                self.optimizer.step()
+                                
+                                batch_loss += loss.item()
+                                batch_positions += 1
+                                
+                            except Exception as e:
+                                logger.warning(f"Error processing position {j}: {e}")
+                                continue
+                        
+                        if batch_positions > 0:
+                            avg_batch_loss = batch_loss / batch_positions
+                            epoch_loss += avg_batch_loss
+                            num_batches += 1
+                            
+                            if num_batches % 10 == 0:
+                                avg_loss = epoch_loss / num_batches
+                                logger.info(f"  Batch {num_batches}: avg_loss={avg_loss:.4f} ({batch_positions} positions)")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing batch {num_batches}: {e}")
+                        continue
+                
+                # Calculate epoch metrics
+                if num_batches > 0:
+                    avg_epoch_loss = epoch_loss / num_batches
+                    epoch_metrics = {
+                        'total_loss': avg_epoch_loss,
+                        'learning_rate': self.scheduler.get_last_lr()[0],
+                        'num_batches': num_batches
+                    }
+                    
+                    # Log metrics
+                    self._log_metrics(epoch, epoch_metrics)
+                    
+                    # Update learning rate
+                    self.scheduler.step()
+                    
+                    # Save checkpoint
+                    if (epoch + 1) % self.config.save_interval == 0:
+                        self.save_checkpoint(epoch, epoch_metrics)
+                    
+                    # Update best loss
+                    if avg_epoch_loss < best_loss:
+                        best_loss = avg_epoch_loss
+                        self.save_checkpoint(epoch, epoch_metrics, is_best=True)
+                    
+                    metrics_history.append(epoch_metrics)
+                
+                else:
+                    logger.warning(f"No batches processed in epoch {epoch + 1}")
+            
+            # Find and return the best model path
+            best_model_path = checkpoints_dir / 'best_model.pt'
+            if best_model_path.exists():
+                logger.info(f"Training completed! Best model: {best_model_path}")
+                return str(best_model_path)
+            else:
+                # Return latest checkpoint
+                latest_checkpoint = None
+                for checkpoint_file in checkpoints_dir.glob('checkpoint_epoch_*.pt'):
+                    if latest_checkpoint is None or checkpoint_file.stat().st_mtime > latest_checkpoint.stat().st_mtime:
+                        latest_checkpoint = checkpoint_file
+                
+                if latest_checkpoint:
+                    logger.info(f"Training completed! Latest model: {latest_checkpoint}")
+                    return str(latest_checkpoint)
+                else:
+                    raise Exception("No checkpoints found after training")
+                    
+        except Exception as e:
+            logger.error(f"Critical error during unified storage training: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
+
     def train(self, setup_logging_fn=None):
         """Train the model.
         
@@ -458,10 +677,28 @@ class Trainer:
                     # Data loading timing
                     data_load_start = time.time()
                     
-                    # Move batch to device
-                    data = batch['data'].to(self.device)
-                    policy_target = batch['policy'].to(self.device)
-                    value_target = batch['value'].to(self.device)
+                    # Handle different batch formats (unified storage vs standard DataLoader)
+                    if isinstance(batch['data'], list):
+                        # Unified storage format - convert lists to tensors
+                        from rival_ai.utils.board_conversion import board_to_hetero_data
+                        import chess
+                        
+                        # Convert batch data to proper tensors
+                        hetero_data_list = []
+                        for board_fen in batch['data']:
+                            board = chess.Board(board_fen)
+                            hetero_data = board_to_hetero_data(board)
+                            hetero_data_list.append(hetero_data)
+                        
+                        # Stack the hetero data (this might need custom batching logic)
+                        data = hetero_data_list[0]  # For now, process one at a time
+                        policy_target = torch.tensor(batch['policy'][0], dtype=torch.float32).to(self.device)
+                        value_target = torch.tensor(batch['value'][0], dtype=torch.float32).to(self.device)
+                    else:
+                        # Standard DataLoader format
+                        data = batch['data'].to(self.device)
+                        policy_target = batch['policy'].to(self.device)
+                        value_target = batch['value'].to(self.device)
                     
                     timing_metrics['data_load_time'] += time.time() - data_load_start
                     timing_metrics['gpu_transfer_time'] += time.time() - data_load_start

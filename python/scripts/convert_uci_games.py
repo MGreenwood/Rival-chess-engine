@@ -27,6 +27,7 @@ try:
     from rival_ai.training.training_types import GameRecord
     from rival_ai.chess import GameResult
     from rival_ai.utils.board_conversion import board_to_hetero_data
+    from rival_ai.unified_storage import get_unified_storage, GameSource, UnifiedGameData
 except ImportError as e:
     print(f"❌ Failed to import RivalAI modules: {e}")
     print("Make sure you're running this from the scripts/ directory")
@@ -37,6 +38,7 @@ class UCIGameConverter:
     
     def __init__(self, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         self.device = device
+        self.storage = get_unified_storage()  # Use unified storage
         
     def convert_tournament_results(self, tournament_dir: str, output_dir: str, cleanup_pgn: bool = True):
         """Convert all games from a tournament results directory."""
@@ -60,28 +62,14 @@ class UCIGameConverter:
         # Convert PGN games
         pgn_dir = tournament_path / "pgn"
         if pgn_dir.exists():
-            game_records = self.convert_pgn_directory(pgn_dir)
+            unified_games = self.convert_pgn_directory_to_unified(pgn_dir)
             
-            if game_records:
-                # Save in RivalAI training format
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_file = output_path / f"uci_training_games_{timestamp}.pkl"
+            if unified_games:
+                # Store in unified storage
+                self.storage.store_multiple_games(unified_games)
                 
-                with open(output_file, 'wb') as f:
-                    pickle.dump(game_records, f)
-                
-                print(f"✅ Converted {len(game_records)} games to training format")
-                print(f"💾 Saved to: {output_file}")
-                
-                # Also save to RivalAI's training games directory
-                training_dir = Path("../python/training_games/uci_matches/processed")
-                training_dir.mkdir(exist_ok=True, parents=True)
-                
-                training_file = training_dir / f"uci_games_{timestamp}.pkl"
-                with open(training_file, 'wb') as f:
-                    pickle.dump(game_records, f)
-                
-                print(f"📚 Also saved to training directory: {training_file}")
+                print(f"✅ Converted {len(unified_games)} games to unified format")
+                print(f"📦 Stored in unified storage system")
                 
                 # Clean up PGN files after successful conversion
                 if cleanup_pgn:
@@ -89,13 +77,30 @@ class UCIGameConverter:
                 else:
                     print(f"📁 PGN files preserved in: {pgn_dir}")
                 
-                return len(game_records)
+                return len(unified_games)
             else:
                 print("❌ No games found to convert")
                 return 0
         else:
             print(f"❌ No PGN directory found: {pgn_dir}")
             return 0
+    
+    def convert_pgn_directory_to_unified(self, pgn_dir: Path) -> List[UnifiedGameData]:
+        """Convert all PGN files in a directory to UnifiedGameData."""
+        unified_games = []
+        
+        pgn_files = list(pgn_dir.glob("*.pgn"))
+        print(f"🔄 Converting {len(pgn_files)} PGN files to unified format...")
+        
+        for pgn_file in pgn_files:
+            try:
+                games = self.convert_pgn_file_to_unified(pgn_file)
+                unified_games.extend(games)
+                print(f"  ✓ {pgn_file.name}: {len(games)} games")
+            except Exception as e:
+                print(f"  ❌ {pgn_file.name}: {e}")
+        
+        return unified_games
     
     def convert_pgn_directory(self, pgn_dir: Path) -> List[GameRecord]:
         """Convert all PGN files in a directory to GameRecords."""
@@ -139,6 +144,27 @@ class UCIGameConverter:
         except Exception:
             pass  # Directory not empty or other issue, that's fine
     
+    def convert_pgn_file_to_unified(self, pgn_file: Path) -> List[UnifiedGameData]:
+        """Convert a single PGN file to UnifiedGameData."""
+        unified_games = []
+        
+        with open(pgn_file) as f:
+            game_index = 0
+            while True:
+                game = chess.pgn.read_game(f)
+                if game is None:
+                    break
+                
+                try:
+                    unified_game = self.convert_pgn_game_to_unified(game, f"{pgn_file.stem}_{game_index}")
+                    if unified_game:
+                        unified_games.append(unified_game)
+                        game_index += 1
+                except Exception as e:
+                    print(f"    ⚠️ Failed to convert game: {e}")
+        
+        return unified_games
+    
     def convert_pgn_file(self, pgn_file: Path) -> List[GameRecord]:
         """Convert a single PGN file to GameRecords."""
         game_records = []
@@ -157,6 +183,92 @@ class UCIGameConverter:
                     print(f"    ⚠️ Failed to convert game: {e}")
         
         return game_records
+    
+    def convert_pgn_game_to_unified(self, game: chess.pgn.Game, game_id: str) -> Optional[UnifiedGameData]:
+        """Convert a chess.pgn.Game to UnifiedGameData format."""
+        try:
+            # Extract game information
+            headers = game.headers
+            white_player = headers.get("White", "Unknown")
+            black_player = headers.get("Black", "Unknown")
+            result = headers.get("Result", "*")
+            
+            # Determine if RivalAI was playing and what color
+            rival_ai_white = white_player == "RivalAI"
+            rival_ai_black = black_player == "RivalAI"
+            
+            if not (rival_ai_white or rival_ai_black):
+                # Skip games where RivalAI wasn't playing
+                return None
+            
+            # Convert result
+            if result == "1-0":  # White wins
+                game_result = "white_wins"
+            elif result == "0-1":  # Black wins
+                game_result = "black_wins"
+            else:  # Draw or unknown
+                game_result = "draw"
+            
+            # Process moves
+            positions = []
+            board = chess.Board()
+            node = game
+            
+            while node.variations:
+                node = node.variations[0]
+                move = node.move
+                
+                if move is None:
+                    break
+                
+                # Record position
+                fen = board.fen()
+                move_uci = move.uci()
+                
+                # Estimate value based on game result
+                value = self.estimate_position_value(game_result, len(positions), rival_ai_white)
+                
+                positions.append({
+                    'fen': fen,
+                    'move': move_uci,
+                    'value': value,
+                    'policy': None  # No policy data from PGN
+                })
+                
+                board.push(move)
+            
+            return UnifiedGameData(
+                game_id=game_id,
+                source=GameSource.UCI_TOURNAMENT,
+                positions=positions,
+                result=game_result,
+                metadata={
+                    'white_player': white_player,
+                    'black_player': black_player,
+                    'tournament': 'UCI',
+                    'rival_ai_color': 'white' if rival_ai_white else 'black'
+                },
+                timestamp=datetime.now().isoformat()
+            )
+        except Exception as e:
+            print(f"Failed to convert PGN game: {e}")
+            return None
+    
+    def estimate_position_value(self, game_result: str, move_number: int, rival_ai_white: bool) -> float:
+        """Estimate position value based on final game result."""
+        total_moves_estimate = 40  # Typical game length
+        progress = min(move_number / total_moves_estimate, 1.0)
+        
+        # Determine target value based on result
+        if game_result == "white_wins":
+            target = 1.0 if rival_ai_white else -1.0
+        elif game_result == "black_wins":
+            target = -1.0 if rival_ai_white else 1.0
+        else:
+            target = 0.0
+        
+        # Interpolate from 0 (uncertain at start) to target (known at end)
+        return target * progress
     
     def convert_game_to_record(self, game: chess.pgn.Game) -> Optional[GameRecord]:
         """Convert a chess.pgn.Game to a GameRecord."""
@@ -292,13 +404,14 @@ def main():
     
     if num_converted > 0:
         print(f"\n✅ Successfully converted {num_converted} games!")
-        print("🚀 These games can now be used for RivalAI training.")
+        print("📦 Games stored in unified storage format")
+        print("🚀 Will be automatically included in next training session.")
         
         # Suggest next steps
         print("\n📋 Next Steps:")
-        print("1. Review the converted games in the output directory")
-        print("2. Run training with: python ../python/scripts/train.py")
-        print("3. Monitor training progress and model improvement")
+        print("1. Games are now ready for unified training")
+        print("2. Server will auto-train when enough games accumulate")
+        print("3. Monitor training progress via server stats")
         print("4. Run more UCI tournaments to collect additional data")
     else:
         print("\n❌ No games were converted. Check the tournament directory.")

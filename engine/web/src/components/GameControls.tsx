@@ -2,7 +2,7 @@ import React from 'react';
 import useStore from '../store/store';
 
 export const GameControls: React.FC = () => {
-  const { connectionStatus, gameActions, currentGame } = useStore();
+  const { gameActions, currentGame } = useStore();
   const { startNewGame } = gameActions;
 
   // Function to get a user-friendly game result message

@@ -22,6 +22,10 @@ import chess.engine
 import argparse
 from dataclasses import dataclass
 
+# Add src to path for unified storage import
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+from rival_ai.unified_storage import get_unified_storage, UnifiedGameData, GameSource
+
 @dataclass
 class EngineConfig:
     name: str
@@ -34,9 +38,9 @@ class TournamentConfig:
     rival_ai_path: str
     opponent_engines: List[EngineConfig]
     games_per_opponent: int = 10
-    save_pgn: bool = True
+    save_pgn: bool = False  # Disabled - unified storage is sufficient
     save_training_data: bool = True
-    output_dir: str = "uci_tournament_results"
+    output_dir: str = "results/tournaments"
 
 class UCITournament:
     def __init__(self, config: TournamentConfig):
@@ -48,6 +52,10 @@ class UCITournament:
         # Create output directory
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Initialize unified storage for automatic training data collection
+        self.unified_storage = get_unified_storage()
+        print(f"🎯 Unified storage initialized - all games will automatically become training data")
         
         # Initialize results tracking
         for engine in config.opponent_engines:
@@ -343,6 +351,12 @@ class UCITournament:
         else:
             rival_result = "draw"
         
+        # Convert to unified storage format automatically
+        try:
+            self.store_game_in_unified_storage(moves, result, opponent_name, rival_ai_white)
+        except Exception as e:
+            print(f"    ⚠️ Failed to store game in unified storage: {e}")
+        
         # Update stats
         stats = self.results[opponent_name]
         if rival_result == "win":
@@ -372,6 +386,68 @@ class UCITournament:
         
         print(f"    📊 vs {opponent_name}: {wins}W-{losses}L-{draws}D ({win_rate:.1f}% win rate)")
         print(f"    🏆 Tournament progress: {self.games_played}/{self.total_games} games")
+        
+        # Show unified storage status
+        total_stored = self.unified_storage.get_total_games()
+        ready_for_training = self.unified_storage.get_training_ready_count()
+        print(f"    💾 Unified storage: {total_stored} total games, {ready_for_training} ready for training")
+
+    def store_game_in_unified_storage(self, moves: List[str], result: str, opponent_name: str, rival_ai_white: bool):
+        """Convert UCI game to unified storage format and store automatically."""
+        # Create positions by replaying the game
+        positions = []
+        board = chess.Board()
+        
+        for i, move_uci in enumerate(moves):
+            try:
+                # Store position before the move
+                move = chess.Move.from_uci(move_uci)
+                
+                # Basic position data (no policy/value data from UCI games)
+                position_data = {
+                    'fen': board.fen(),
+                    'move': move_uci,
+                    'value': 0.0,  # No value data available from UCI games
+                    'policy': None,  # No policy data available from UCI games
+                    'move_number': i + 1,
+                    'player': 'rival_ai' if (board.turn == chess.WHITE and rival_ai_white) or (board.turn == chess.BLACK and not rival_ai_white) else opponent_name
+                }
+                positions.append(position_data)
+                
+                # Make the move
+                board.push(move)
+                
+            except Exception as e:
+                print(f"    ⚠️ Error processing move {i}: {e}")
+                break
+        
+        # Convert result to unified format
+        if result == "1-0":
+            unified_result = "white_wins"
+        elif result == "0-1":
+            unified_result = "black_wins"
+        else:
+            unified_result = "draw"
+        
+        # Create unified game data
+        game_id = f"uci_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.games_played}"
+        unified_game = UnifiedGameData(
+            game_id=game_id,
+            source=GameSource.UCI_TOURNAMENT,
+            positions=positions,
+            result=unified_result,
+            metadata={
+                'opponent': opponent_name,
+                'rival_ai_white': rival_ai_white,
+                'total_moves': len(moves),
+                'tournament_game': True,
+                'time_control': self.config.opponent_engines[0].time_limit if self.config.opponent_engines else 5.0
+            },
+            timestamp=datetime.now().isoformat()
+        )
+        
+        # Store in unified storage
+        self.unified_storage.store_game(unified_game)
 
     def save_game_pgn(self, board: chess.Board, moves: List[str], opponent: str, rival_ai_white: bool, result: str):
         """Save game in PGN format."""
@@ -468,6 +544,20 @@ class UCITournament:
                   f"({win_rate:5.1f}%) avg {avg_time:.1f}s/game")
         
         print(f"\n📁 Detailed results and PGN files saved in: {self.output_dir}")
+        
+        # Show final unified storage status
+        total_games = self.unified_storage.get_total_games()
+        ready_for_training = self.unified_storage.get_training_ready_count()
+        print(f"\n🎯 TRAINING DATA STATUS:")
+        print(f"📦 Total games in unified storage: {total_games}")
+        print(f"🎓 Games ready for training: {ready_for_training}")
+        
+        if ready_for_training >= 1000:
+            print(f"✅ Sufficient training data available!")
+            print(f"🚀 Start server with --enable-training to begin automatic training")
+        else:
+            print(f"📈 Need {1000 - ready_for_training} more games for training threshold")
+            print(f"🔄 Run more tournaments or start server for self-play generation")
 
 def main():
     parser = argparse.ArgumentParser(description="Run UCI tournament for RivalAI")
@@ -479,8 +569,8 @@ def main():
                       help="Games per opponent (each color)")
     parser.add_argument("--time", type=float, default=5.0,
                       help="Time limit per move (seconds)")
-    parser.add_argument("--output", default="uci_tournament_results",
-                      help="Output directory")
+    parser.add_argument("--output", default="results/tournaments",
+                      help="Output directory for tournament results")
     
     args = parser.parse_args()
     
@@ -510,11 +600,15 @@ def main():
             for i, path in enumerate(args.engines)
         ]
     
+    # Create timestamped output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = f"{args.output}/{timestamp}_vs_{'_'.join(engine.name for engine in opponent_engines)}"
+    
     config = TournamentConfig(
         rival_ai_path=args.rival_ai,
         opponent_engines=opponent_engines,
         games_per_opponent=args.games,
-        output_dir=args.output
+        output_dir=output_dir
     )
     
     tournament = UCITournament(config)

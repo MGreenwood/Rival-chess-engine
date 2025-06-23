@@ -67,6 +67,7 @@ export const CommunityGame: React.FC = () => {
   const [lastVoteResults, setLastVoteResults] = useState<Record<string, number> | null>(null);
   const [boardSize, setBoardSize] = useState<number>(600);
   const [isDragging, setIsDragging] = useState(false);
+  const [isPlayerInCheck, setIsPlayerInCheck] = useState(false);
   const boardContainerRef = useRef<HTMLDivElement>(null);
 
   // Create voter session on component mount
@@ -220,7 +221,7 @@ export const CommunityGame: React.FC = () => {
       }
     };
 
-    const handleMouseUp = (e: MouseEvent) => {
+    const handleMouseUp = (_e: MouseEvent) => {
       // Clear dragging state on mouse up
       if (isDragging) {
         setIsDragging(false);
@@ -257,6 +258,14 @@ export const CommunityGame: React.FC = () => {
   useEffect(() => {
     if (gameState?.board) {
       game.load(gameState.board);
+      
+      // Check for check status
+      setIsPlayerInCheck(game.inCheck());
+      
+      // Log check status for debugging
+      if (game.inCheck()) {
+        console.log('🔴 Player is in CHECK!');
+      }
       
       const currentMoveCount = gameState.move_history?.length || 0;
       
@@ -420,12 +429,7 @@ export const CommunityGame: React.FC = () => {
     setIsDragging(false);
     
     if (!gameState?.can_vote || !voterSession || gameState?.engine_thinking) {
-      if (gameState?.engine_thinking) {
-        setErrorMessage('Please wait - engine is thinking');
-      } else {
-        setErrorMessage('Cannot vote at this time');
-      }
-      return;
+      return; // Silently reject when not able to vote
     }
 
     if (selectedSquare === null) {
@@ -455,12 +459,7 @@ export const CommunityGame: React.FC = () => {
     setIsDragging(false);
     
     if (!gameState?.can_vote || !voterSession || gameState?.engine_thinking) {
-      if (gameState?.engine_thinking) {
-        setErrorMessage('Please wait - engine is thinking');
-      } else {
-        setErrorMessage('Cannot vote at this time');
-      }
-      return false;
+      return false; // Silently reject when not able to vote
     }
 
     // Try to validate the move
@@ -745,8 +744,19 @@ export const CommunityGame: React.FC = () => {
       </div>
 
       {/* Chessboard - Centered with Engine Thinking Overlay */}
-      <div className="border-2 border-gray-200 dark:border-gray-600 rounded-lg p-2 mb-3" style={{ maxWidth: `${boardSize + 16}px` }}>
+      <div 
+        className={`border-2 rounded-lg p-2 mb-3 ${isPlayerInCheck ? 'border-red-500' : 'border-gray-200 dark:border-gray-600'}`}
+        style={{ 
+          maxWidth: `${boardSize + 16}px`,
+          boxShadow: isPlayerInCheck 
+            ? '0 0 0 4px rgba(239, 68, 68, 0.3), 0 2px 8px rgba(0, 0, 0, 0.2)' 
+            : undefined,
+          transition: 'box-shadow 0.3s ease-in-out'
+        }}
+      >
         <div ref={boardContainerRef} className="w-full aspect-square relative">
+
+        
         <Chessboard
           position={previewPosition || gameState.board}
           onSquareClick={handleSquareClick}

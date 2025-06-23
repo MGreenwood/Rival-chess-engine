@@ -1,7 +1,7 @@
 import React, { memo, useEffect, useMemo } from 'react';
 import useStore from '../store/store';
 import { formatDistanceToNow, isValid } from 'date-fns';
-import DonationButton from './DonationButton';
+
 
 const ModelStats: React.FC = memo(() => {
   const { modelStats, recentGames, currentMode, uiActions } = useStore();
@@ -13,11 +13,6 @@ const ModelStats: React.FC = memo(() => {
 
   // Memoize filtered games to prevent excessive re-computation
   const filteredGames = useMemo(() => {
-    console.log(`🎯 Filtering games for ${currentMode}:`, {
-      totalGames: recentGames.length,
-      currentMode
-    });
-    
     // Ensure recentGames is always an array to prevent "filter is not a function" errors
     const completedGames = (Array.isArray(recentGames) ? recentGames : [])
       .filter(game => {
@@ -51,7 +46,6 @@ const ModelStats: React.FC = memo(() => {
       })
       .slice(0, 10);
     
-    console.log(`✅ Filtered ${completedGames.length} games for ${currentMode}`);
     return completedGames;
   }, [recentGames, currentMode]);
   
@@ -150,7 +144,7 @@ const ModelStats: React.FC = memo(() => {
         </h3>
         {filteredGames.length > 0 ? (
           <div className="space-y-2 max-h-64 overflow-y-auto">
-            {filteredGames.map((game, index) => {
+            {filteredGames.map((game, _index) => {
               // Show result from AI's perspective
               const getAIResult = (game: any) => {
                 switch (game.status) {

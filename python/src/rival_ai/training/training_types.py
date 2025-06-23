@@ -2,11 +2,12 @@
 Shared types for training components.
 """
 
-from typing import List, NamedTuple, Optional
+from typing import List, NamedTuple, Optional, Dict, Any, Union
 import torch
 from rival_ai.chess import GameResult
 import chess
 from dataclasses import dataclass, field
+import numpy as np
 
 @dataclass
 class GameRecord:
@@ -22,20 +23,93 @@ class GameRecord:
         """Add a board state to the record."""
         self.states.append(state.copy())
     
-    def add_move(self, move: chess.Move, policy: Optional[torch.Tensor] = None, value: Optional[float] = None) -> None:
-        """Add a move to the record.
+    def add_move(self, move: chess.Move, policy: Union[torch.Tensor, np.ndarray, Dict], value: float, pag_features: Optional[torch.Tensor] = None):
+        """Add a move to the game record.
         
         Args:
-            move: The move made
-            policy: Optional policy tensor for the move
-            value: Optional value prediction for the move
+            move: The chess move
+            policy: Policy distribution (tensor, array, or dict)
+            value: Position evaluation
+            pag_features: Optional PAG features for the position
         """
-        self.moves.append(move)
-        self.num_moves += 1
-        if policy is not None:
-            self.policies.append(policy)
-        if value is not None:
-            self.values.append(value)
+        # Convert policy to consistent format
+        if isinstance(policy, dict):
+            # Convert move dict to tensor
+            policy_tensor = torch.zeros(5312, dtype=torch.float32)
+            for chess_move, prob in policy.items():
+                idx = self._move_to_index(chess_move)
+                if 0 <= idx < 5312:
+                    policy_tensor[idx] = float(prob)
+            policy = policy_tensor
+        elif isinstance(policy, np.ndarray):
+            policy = torch.from_numpy(policy).float()
+        elif not isinstance(policy, torch.Tensor):
+            raise ValueError(f"Unsupported policy type: {type(policy)}")
+        
+        move_data = MoveData(
+            move=move,
+            policy=policy,
+            value=float(value),
+            pag_features=pag_features
+        )
+        self.moves.append(move_data)
+    
+    def _move_to_index(self, move: chess.Move) -> int:
+        """Convert a chess move to an index for policy representation.
+        
+        Args:
+            move: Chess move to convert
+            
+        Returns:
+            Index in the policy vector (0-5311)
+        """
+        if move.promotion:
+            # 🔥 FIXED: Use compact encoding that fits in available slots (4096-5311)
+            # The old encoding produced indices beyond 5,311 which broke training!
+            
+            piece_type = {
+                chess.KNIGHT: 0,  # 0-based for compact encoding
+                chess.BISHOP: 1, 
+                chess.ROOK: 2,
+                chess.QUEEN: 3
+            }.get(move.promotion, 3)  # Default to queen
+            
+            # Extract file and rank info
+            from_file = move.from_square % 8
+            from_rank = move.from_square // 8
+            to_file = move.to_square % 8
+            to_rank = move.to_square // 8
+            
+            # Determine promotion direction
+            if to_file == from_file:
+                direction = 0  # Straight promotion
+            elif to_file == from_file - 1:
+                direction = 1  # Capture left
+            elif to_file == from_file + 1:
+                direction = 2  # Capture right
+            else:
+                return 4096  # Invalid promotion fallback
+            
+            # Determine side (White or Black promotion)
+            if from_rank == 6 and to_rank == 7:  # White promotion
+                side_offset = 0
+            elif from_rank == 1 and to_rank == 0:  # Black promotion  
+                side_offset = 96  # 8 files * 3 directions * 4 pieces = 96
+            else:
+                return 4096  # Invalid promotion ranks fallback
+            
+            # Compact index calculation that fits in 1,216 available slots
+            # Format: 4096 + side_offset + (file * 12) + (direction * 4) + piece_type
+            index = 4096 + side_offset + (from_file * 12) + (direction * 4) + piece_type
+            
+            # Ensure it's within bounds
+            if index < 5312:
+                return index
+            else:
+                return 4096  # Fallback if somehow out of bounds
+        else:
+            # Regular moves: from_square * 64 + to_square
+            return move.from_square * 64 + move.to_square
     
     def add_policy(self, policy: torch.Tensor) -> None:
         """Add a policy distribution to the record."""
@@ -108,6 +182,28 @@ class GameRecord:
             result=self.result,
             num_moves=self.num_moves
         )
+
+@dataclass
+class MoveData:
+    """Data for a single move in a game."""
+    move: chess.Move
+    policy: torch.Tensor  # Policy distribution over all moves
+    value: float  # Position evaluation
+    pag_features: Optional[torch.Tensor] = None  # PAG features for the position
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        data = {
+            'move': self.move.uci(),
+            'policy': self.policy.tolist() if isinstance(self.policy, torch.Tensor) else self.policy,
+            'value': float(self.value)
+        }
+        
+        # Include PAG features if available
+        if self.pag_features is not None:
+            data['pag_features'] = self.pag_features.tolist() if isinstance(self.pag_features, torch.Tensor) else self.pag_features
+            
+        return data
 
 class GameRecordTuple(NamedTuple):
     """Immutable version of GameRecord."""

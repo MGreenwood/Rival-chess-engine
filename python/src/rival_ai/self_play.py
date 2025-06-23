@@ -149,10 +149,13 @@ def play_game(mcts: MCTS, max_moves: int = 200) -> GameRecord:
         legal_moves = board.legal_moves
         legal_mask = np.zeros(5312, dtype=np.float32)
         for move in legal_moves:
-            # Calculate correct move index including promotions
-            move_idx = move.from_square * 64 + move.to_square
+            # Calculate correct move index using consistent PAG encoding
             if move.promotion:
-                move_idx += 4096 + (move.promotion - 2) * 64
+                # Promotion moves: 4096 + (from_square * 64 + to_square) * 4 + promotion_piece_type - 1
+                move_idx = 4096 + (move.from_square * 64 + move.to_square) * 4 + move.promotion - 1
+            else:
+                # Regular moves: from_square * 64 + to_square
+                move_idx = move.from_square * 64 + move.to_square
             if 0 <= move_idx < 5312:
                 legal_mask[move_idx] = 1.0
             else:

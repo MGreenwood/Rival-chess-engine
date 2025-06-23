@@ -33,22 +33,7 @@ const getApiBaseUrl = (): string => {
   return apiUrl;
 };
 
-// Alternative API URLs to try if the primary fails
-const getApiAlternatives = (): string[] => {
-  const host = window.location.host;
-  const protocol = window.location.protocol;
-  
-  if (host === 'rivalchess.xyz') {
-    return [
-      `${protocol}//rivalchess.xyz`,
-      `${protocol}//rivalchess.xyz:3000`,
-      `${protocol}//rivalchess.xyz:8000`,
-      `${protocol}//rivalchess.xyz/api`
-    ];
-  }
-  
-  return [`${protocol}//${host}`];
-};
+
 
 const API_BASE_URL = getApiBaseUrl();
 
@@ -120,6 +105,10 @@ interface StoreState {
     startNewGame: (mode: GameMode) => Promise<void>;
     loadGame: (gameId: string, mode: GameMode) => Promise<void>;
     deleteGame: (gameId: string, mode: GameMode) => Promise<void>;
+    syncGameState: (gameId: string) => Promise<void>;
+    startGameHeartbeat: (gameId: string, mode: GameMode) => void;
+    stopGameHeartbeat: () => void;
+    restoreGameFromStorage: (mode: GameMode) => Promise<boolean>;
   };
   uiActions: {
     setTheme: (theme: Theme) => void;
@@ -189,7 +178,13 @@ const useStore = create<StoreState>((set, get) => {
           });
 
           if (response.data.success) {
-            console.log('Move successful, updating state. New board:', response.data.board);
+            console.log('✅ Move successful! Updating state...');
+            console.log('📋 Old board:', freshGame.board);
+            console.log('📋 New board:', response.data.board);
+            console.log('🔄 Server move history:', response.data.move_history);
+            console.log('🎯 Server says player turn:', response.data.is_player_turn);
+            console.log('📊 Move count: old =', freshGame.move_history?.length || 0, 'new =', response.data.move_history?.length || 0);
+            
             const newGameState: GameState = {
               ...freshGame,
               board: response.data.board,
@@ -203,7 +198,29 @@ const useStore = create<StoreState>((set, get) => {
                 last_move_at: new Date().toISOString()
               }
             };
+            
             set({ currentGame: newGameState, loading: false });
+            
+            // 🔥 NEW: Update localStorage with latest complete game state and fresh expiration
+            const currentMode = get().currentMode;
+            if (response.data.status === 'active') {
+              // Save complete updated game state with fresh expiration
+              const now = Date.now();
+              localStorage.setItem(`chess_game_${currentMode}`, JSON.stringify({
+                gameId: newGameState.game_id,
+                mode: currentMode,
+                timestamp: now,
+                expiresAt: now + (5 * 60 * 1000), // Fresh 5 minute expiration
+                board: response.data.board,
+                moveHistory: response.data.move_history || [],
+                status: response.data.status
+              }));
+            } else {
+              // Game ended - clean up localStorage and stop heartbeat
+              console.log('🧹 Game ended, cleaning up localStorage and heartbeat...');
+              localStorage.removeItem(`chess_game_${currentMode}`);
+              get().gameActions.stopGameHeartbeat();
+            }
             
             // If game ended, invalidate cache and refresh stats
             if (response.data.status !== 'active') {
@@ -221,6 +238,34 @@ const useStore = create<StoreState>((set, get) => {
           }
         } catch (error: any) {
           set({ loading: false });
+          
+          // Check if this is a desync error that requires automatic sync
+          const isDesyncError = error.response?.data?.error_type === 'desync' || 
+                                error.response?.data?.requires_sync;
+          
+          const currentGameId = get().currentGame?.metadata?.game_id || get().currentGame?.game_id;
+          
+          if (isDesyncError && currentGameId) {
+            console.log('🔄 Desync error detected, triggering automatic sync...');
+            console.log('📊 Server state:', {
+              board: error.response?.data?.server_board,
+              moveHistory: error.response?.data?.server_move_history?.length || 0,
+              legalMoves: error.response?.data?.legal_moves?.length || 0
+            });
+            
+            // Trigger automatic sync
+            try {
+              await get().gameActions.syncGameState(currentGameId);
+              console.log('✅ Automatic sync completed');
+              
+              // Throw a more user-friendly error
+              throw new Error('Move failed due to sync issue. Game state has been synchronized - please try your move again.');
+            } catch (syncError) {
+              console.error('❌ Automatic sync failed:', syncError);
+              throw new Error('Move failed and sync attempt failed. Please try refreshing the page.');
+            }
+          }
+          
           // Keep the error throwing but don't log to console
           const errorMessage = error.response?.data?.error_message || error.message || 'Failed to make move';
           throw new Error(errorMessage);
@@ -290,6 +335,9 @@ const useStore = create<StoreState>((set, get) => {
         try {
           console.log('Starting new game...');
           
+          // Clear any previous game persistence
+          localStorage.removeItem(`chess_game_${mode}`);
+          
           const response = await axios.post(`${API_BASE_URL}/${mode === 'community' ? 'community/start' : 'move/new'}`, {
             player_color: 'white',
           });
@@ -316,8 +364,25 @@ const useStore = create<StoreState>((set, get) => {
               move_history: response.data.move_history || [],
               is_player_turn: response.data.is_player_turn !== false // Default to true
             };
+            
+            // 🔥 NEW: Save complete game state to localStorage with expiration
+            const now = Date.now();
+            localStorage.setItem(`chess_game_${mode}`, JSON.stringify({
+              gameId: response.data.game_id,
+              mode: mode,
+              timestamp: now,
+              expiresAt: now + (5 * 60 * 1000), // 5 minute expiration
+              board: response.data.board,
+              moveHistory: response.data.move_history || [],
+              status: response.data.status || 'active'
+            }));
+            console.log('💾 Game state saved with 5min expiration for instant restoration');
+            
             set({ currentGame: newGameState });
             get().init(); // Refresh recent games list
+            
+            // 🔥 NEW: Start heartbeat for this game
+            get().gameActions.startGameHeartbeat(response.data.game_id, mode);
           }
         } catch (error) {
           console.error('Failed to start new game:', error);
@@ -377,6 +442,183 @@ const useStore = create<StoreState>((set, get) => {
           console.error('Failed to delete game:', error);
         }
       },
+
+      syncGameState: async (gameId: string) => {
+        try {
+          console.log('🔄 Syncing game state for:', gameId);
+          const response = await axios.get(`${API_BASE_URL}/api/game/sync/${gameId}`);
+          
+          if (response.data.success && response.data.game) {
+            const serverGame = response.data.game;
+            console.log('✅ Server sync successful:', {
+              source: response.data.source,
+              board: serverGame.board,
+              moves: serverGame.move_history?.length || 0
+            });
+            
+            // Update current game with server state
+            const syncedGameState: GameState = {
+              game_id: serverGame.game_id,
+              metadata: {
+                game_id: serverGame.game_id,
+                mode: 'single' as GameMode,
+                created_at: serverGame.metadata?.created_at || new Date().toISOString(),
+                last_move_at: serverGame.metadata?.last_move_at || new Date().toISOString(),
+                status: serverGame.status,
+                total_moves: serverGame.metadata?.total_moves || 0,
+                player_color: 'white',
+                player_name: null,
+                engine_version: '1.0.0'
+              },
+              board: serverGame.board,
+              status: serverGame.status,
+              move_history: serverGame.move_history || [],
+              is_player_turn: serverGame.is_player_turn
+            };
+            
+            set({ currentGame: syncedGameState });
+            console.log('📋 Game state synchronized with server');
+          } else {
+            console.error('❌ Failed to sync game state:', response.data.error);
+          }
+        } catch (error) {
+          console.error('❌ Sync request failed:', error);
+        }
+      },
+
+      startGameHeartbeat: (gameId: string, mode: GameMode) => {
+        // Stop any existing heartbeat
+        get().gameActions.stopGameHeartbeat();
+        
+        console.log('💓 Starting heartbeat for game:', gameId);
+        
+        // Send heartbeat every 30 seconds to maintain reservation + extend localStorage expiration
+        const heartbeatInterval = setInterval(async () => {
+          try {
+            // Simple ping to keep the game alive (optional - server may not support this yet)
+            await axios.post(`${API_BASE_URL}/api/game/heartbeat`, {
+              game_id: gameId,
+              mode: mode,
+              timestamp: Date.now()
+            });
+            console.log('💓 Heartbeat sent for game:', gameId);
+            
+            // Extend localStorage expiration on successful heartbeat
+            const currentGame = get().currentGame;
+            if (currentGame && currentGame.game_id === gameId) {
+              const now = Date.now();
+              localStorage.setItem(`chess_game_${mode}`, JSON.stringify({
+                gameId: gameId,
+                mode: mode,
+                timestamp: now,
+                expiresAt: now + (5 * 60 * 1000), // Extend expiration by 5 minutes
+                board: currentGame.board,
+                moveHistory: currentGame.move_history || [],
+                status: currentGame.status
+              }));
+            }
+          } catch (error: any) {
+            // Heartbeat endpoint might not exist yet - that's OK, still extend localStorage
+            if (error.response?.status === 404) {
+              console.log('💓 Heartbeat endpoint not implemented on server (OK - extending localStorage anyway)');
+            } else {
+              console.warn('💔 Heartbeat failed for game:', gameId, error);
+            }
+            
+            // Even on server heartbeat failure, extend localStorage expiration
+            const currentGame = get().currentGame;
+            if (currentGame && currentGame.game_id === gameId) {
+              const now = Date.now();
+              localStorage.setItem(`chess_game_${mode}`, JSON.stringify({
+                gameId: gameId,
+                mode: mode,
+                timestamp: now,
+                expiresAt: now + (5 * 60 * 1000), // Keep extending even if server heartbeat fails
+                board: currentGame.board,
+                moveHistory: currentGame.move_history || [],
+                status: currentGame.status
+              }));
+            }
+          }
+        }, 30000); // 30 seconds
+
+        // Store interval ID in a way that can be cleared later
+        (window as any).gameHeartbeatInterval = heartbeatInterval;
+      },
+
+      stopGameHeartbeat: () => {
+        const heartbeatInterval = (window as any).gameHeartbeatInterval;
+        if (heartbeatInterval) {
+          console.log('💔 Stopping game heartbeat');
+          clearInterval(heartbeatInterval);
+          (window as any).gameHeartbeatInterval = null;
+        }
+      },
+
+      restoreGameFromStorage: async (mode: GameMode): Promise<boolean> => {
+        try {
+          const savedGameData = localStorage.getItem(`chess_game_${mode}`);
+          if (!savedGameData) {
+            console.log('📭 No saved game found in localStorage for mode:', mode);
+            return false;
+          }
+
+          const { gameId, timestamp, expiresAt, board, moveHistory, status } = JSON.parse(savedGameData);
+          
+          // Check if the saved game has expired
+          const now = Date.now();
+          if (expiresAt && now > expiresAt) {
+            const expiredFor = Math.round((now - expiresAt) / 1000);
+            console.log('⏰ Saved game expired', expiredFor, 'seconds ago, clearing');
+            localStorage.removeItem(`chess_game_${mode}`);
+            return false;
+          }
+          
+          // Fallback for old format without expiresAt (check age)
+          if (!expiresAt) {
+            const age = now - timestamp;
+            if (age > 5 * 60 * 1000) { // 5 minute fallback for old format
+              console.log('⏰ Old format game too old, clearing:', Math.round(age / 1000), 'seconds');
+              localStorage.removeItem(`chess_game_${mode}`);
+              return false;
+            }
+          }
+
+          console.log('⚡ INSTANT restore from localStorage:', gameId);
+          
+          // 🔥 NEW: Restore immediately from localStorage - no server API call!
+          const gameState: GameState = {
+            game_id: gameId,
+            metadata: {
+              game_id: gameId,
+              mode: mode,
+              created_at: new Date(timestamp).toISOString(),
+              last_move_at: new Date().toISOString(),
+              status: status || 'active',
+              total_moves: moveHistory?.length || 0,
+              player_color: 'white', // Default - server will correct if needed
+              player_name: null,
+              engine_version: '1.0.0'
+            },
+            board: board || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            status: status || 'active',
+            move_history: moveHistory || [],
+            is_player_turn: true // Assume it's player's turn - server will correct if needed
+          };
+          
+          set({ currentGame: gameState });
+          
+          // Restart heartbeat for restored game
+          get().gameActions.startGameHeartbeat(gameId, mode);
+          
+          console.log('✅ INSTANT game restoration complete!');
+          return true;
+        } catch (error) {
+          console.error('❌ Failed to restore game from localStorage:', error);
+          localStorage.removeItem(`chess_game_${mode}`);
+          return false;
+        }
+      },
     },
 
     uiActions: {
@@ -397,33 +639,27 @@ const useStore = create<StoreState>((set, get) => {
           const isStale = Date.now() - cached.timestamp > CACHE_DURATION;
           
           if (!isStale && cached.stats) {
-            console.log(`📋 Using cached stats for ${mode}`);
             set({
               modelStats: cached.stats,
               recentGames: cached.recentGames
             });
           } else {
-            console.log(`🔄 Cache stale for ${mode}, refreshing...`);
             get().uiActions.loadStatsForMode(mode);
           }
           return;
         }
-        
-        console.log(`🔄 Switching mode from ${currentMode} to ${mode}`);
         
         // Check if we have cached data for the new mode
         const cached = get().statsCache[mode];
         const isStale = Date.now() - cached.timestamp > CACHE_DURATION;
         
         if (!isStale && cached.stats) {
-          console.log(`📋 Using cached stats for ${mode}`);
           set({
             currentMode: mode,
             modelStats: cached.stats,
             recentGames: cached.recentGames
           });
         } else {
-          console.log(`💾 No valid cache for ${mode}, loading fresh data...`);
           // Clear current stats and games to prevent showing stale data
           set({ 
             currentMode: mode,
@@ -443,8 +679,6 @@ const useStore = create<StoreState>((set, get) => {
           const isStale = Date.now() - cached.timestamp > CACHE_DURATION;
           
           if (!isStale && cached.stats) {
-            console.log(`⚡ Using cached stats for ${mode} (age: ${Math.round((Date.now() - cached.timestamp) / 1000)}s)`);
-            
             // Only update if we're still in the same mode
             const currentMode = get().currentMode;
             if (currentMode === mode) {
@@ -461,29 +695,20 @@ const useStore = create<StoreState>((set, get) => {
           const statsResponse = await axios.get(`${API_BASE_URL}/stats`);
           const statsKey = mode === 'community' ? 'community_model' : 'single_player_model';
           
-          console.log(`📈 Fresh stats response for ${mode}:`, {
-            hasData: !!statsResponse.data[statsKey],
-            totalGames: statsResponse.data[statsKey]?.total_games || 0,
-            statsKey
-          });
-          
           if (statsResponse.data[statsKey]) {
             const stats = statsResponse.data[statsKey];
             
             // Only update if we're still in the same mode (prevent race conditions)
             const currentMode = get().currentMode;
             if (currentMode !== mode) {
-              console.log(`⚠️ Mode changed during stats loading, ignoring results for ${mode}`);
               return;
             }
             
             // If we get 0 total games, try refreshing stats once
             if (stats.total_games === 0) {
-              console.log('Got 0 total games, attempting stats refresh...');
               try {
                 const refreshResponse = await axios.post(`${API_BASE_URL}/stats/refresh`);
                 if (refreshResponse.data[statsKey] && refreshResponse.data[statsKey].total_games > 0) {
-                  console.log('Stats refresh successful!');
                   const refreshedStats = refreshResponse.data[statsKey];
                   
                   // Cache the refreshed stats
@@ -498,9 +723,7 @@ const useStore = create<StoreState>((set, get) => {
                   
                   // Also refresh recent games when stats are refreshed
                   try {
-                    console.log('🔄 Refreshing recent games from:', `${API_BASE_URL}/recent-games`);
                     const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
-                    console.log('📥 Refresh recent games response:', recentGamesResponse.data?.length || 0, 'games');
                     const allGames = Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [];
                     
                     // Update cache with new games
@@ -522,10 +745,8 @@ const useStore = create<StoreState>((set, get) => {
               }
             }
             
-            console.log(`✅ Setting stats for ${mode}:`, stats);
             set({ modelStats: stats });
           } else {
-            console.log(`❌ No stats found for ${mode}, using defaults`);
             const defaultStats = {
               wins: 0,
               losses: 0,
@@ -538,23 +759,13 @@ const useStore = create<StoreState>((set, get) => {
           
           // Always refresh recent games when loading stats for a mode
           try {
-            console.log('🔄 Loading recent games from:', `${API_BASE_URL}/recent-games`);
             const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
             
             // Check if we're still in the same mode (prevent race conditions)
             const currentMode = get().currentMode;
             if (currentMode !== mode) {
-              console.log(`⚠️ Mode changed during recent games loading, ignoring results for ${mode}`);
               return;
             }
-            
-            console.log('📥 Recent games response:', {
-              status: recentGamesResponse.status,
-              dataType: typeof recentGamesResponse.data,
-              isArray: Array.isArray(recentGamesResponse.data),
-              length: recentGamesResponse.data?.length,
-              mode: mode
-            });
             
             const allGames = Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [];
             const currentStats = get().modelStats;
@@ -573,14 +784,8 @@ const useStore = create<StoreState>((set, get) => {
               }
             });
             
-            console.log(`✅ Recent games cached for ${mode}:`, {
-              totalGames: allGames.length,
-              gamesForMode: allGames.filter(g => g.mode === mode).length,
-              cacheTimestamp: Date.now()
-            });
           } catch (recentGamesError) {
             console.error('❌ Failed to load recent games:', recentGamesError);
-            console.error('API URL was:', `${API_BASE_URL}/recent-games`);
             set({ recentGames: [] });
           }
         } catch (error) {
@@ -648,6 +853,31 @@ const useStore = create<StoreState>((set, get) => {
           // Start periodic refresh
           get().uiActions.startPeriodicStatsRefresh();
 
+          // 🔥 NEW: Add cleanup on page unload
+          const handlePageUnload = () => {
+            console.log('🚪 Page unloading, stopping heartbeat...');
+            get().gameActions.stopGameHeartbeat();
+            
+            // Update localStorage with fresh expiration to keep game alive
+            const currentGame = get().currentGame;
+            const currentMode = get().currentMode;
+            if (currentGame && currentGame.status === 'active') {
+              const now = Date.now();
+              localStorage.setItem(`chess_game_${currentMode}`, JSON.stringify({
+                gameId: currentGame.game_id,
+                mode: currentMode,
+                timestamp: now,
+                expiresAt: now + (5 * 60 * 1000), // Fresh 5 minute expiration on page leave
+                board: currentGame.board,
+                moveHistory: currentGame.move_history || [],
+                status: currentGame.status
+              }));
+            }
+          };
+          
+          window.addEventListener('beforeunload', handlePageUnload);
+          window.addEventListener('pagehide', handlePageUnload);
+
           // Load recent games
           try {
             console.log('🏁 Init: Loading recent games from:', `${API_BASE_URL}/recent-games`);
@@ -680,15 +910,29 @@ const useStore = create<StoreState>((set, get) => {
             const games = Array.isArray(response.data) ? response.data : [];
             set({ recentGames: games });
 
-            // Load current game if there's an active one
-            const activeGame = games.find((game: any) => game.status === 'active');
-            if (activeGame) {
-              try {
-                await get().gameActions.loadGame(activeGame.game_id, activeGame.mode);
-              } catch (error) {
-                // Don't load corrupted games
+                      // Check if a game is already loaded (from immediate restoration)
+          const currentGame = get().currentGame;
+          if (!currentGame) {
+            // 🔥 Only try restoration if no game is already loaded
+            const currentMode = get().currentMode;
+            const restoredFromStorage = await get().gameActions.restoreGameFromStorage(currentMode);
+            
+            if (!restoredFromStorage) {
+              // Fallback: Load current game if there's an active one in recent games
+              const activeGame = games.find((game: any) => game.status === 'active');
+              if (activeGame) {
+                try {
+                  await get().gameActions.loadGame(activeGame.game_id, activeGame.mode);
+                  // Start heartbeat for the loaded game
+                  get().gameActions.startGameHeartbeat(activeGame.game_id, activeGame.mode);
+                } catch (error) {
+                  // Don't load corrupted games
+                }
               }
             }
+          } else {
+            console.log('🎮 Game already loaded, skipping duplicate restoration in store.init()');
+          }
           } catch (error) {
             console.error('❌ Init: Failed to load recent games:', error);
             set({ recentGames: [] });

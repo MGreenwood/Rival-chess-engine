@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Chessboard } from 'react-chessboard';
 import type { Square, Piece } from 'react-chessboard/dist/chessboard/types';
+import { Chess } from 'chess.js';
 import useStore from '../store/store';
 import type { GameState } from '../store/types';
 
@@ -12,6 +13,7 @@ interface ChessGameProps {
   boardTheme?: string;
   initialPosition?: string;
   viewOnly?: boolean;
+  skipAutoInit?: boolean; // Skip auto-initialization (during restoration)
 }
 
 export function ChessGame({ 
@@ -21,23 +23,52 @@ export function ChessGame({
   animationDuration = 300,
   boardTheme = 'classic',
   initialPosition,
-  viewOnly = false
+  viewOnly = false,
+  skipAutoInit = false
 }: ChessGameProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [boardWidth, setBoardWidth] = useState(400);
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
-  const [moveError, setMoveError] = useState<string | null>(null);
+
   const [lastMoveFrom, setLastMoveFrom] = useState<Square | null>(null);
   const [lastMoveTo, setLastMoveTo] = useState<Square | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [lastReportedGameStatus, setLastReportedGameStatus] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isPlayerInCheck, setIsPlayerInCheck] = useState(false);
 
   const { gameActions, currentGame, loading } = useStore();
-  const { makeMove, startNewGame } = gameActions;
+  const { makeMove, startNewGame, syncGameState } = gameActions;
 
   // Add state for controlled board position
   const [boardPosition, setBoardPosition] = useState<string>(initialPosition || currentGame?.board || 'start');
+
+  // Function to detect if the current player is in check
+  const detectCheck = useCallback((fen: string): boolean => {
+    try {
+      const chess = new Chess(fen);
+      return chess.inCheck();
+    } catch (error) {
+      console.warn('Error detecting check from FEN:', fen, error);
+      return false;
+    }
+  }, []);
+
+  // Check for check status whenever the board position changes
+  useEffect(() => {
+    if (boardPosition && boardPosition !== 'start') {
+      const inCheck = detectCheck(boardPosition);
+      setIsPlayerInCheck(inCheck);
+      
+      // Log check status for debugging
+      if (inCheck) {
+        console.log('🔴 Player is in CHECK!');
+      }
+    } else {
+      setIsPlayerInCheck(false);
+    }
+  }, [boardPosition, detectCheck]);
 
   // Update board width when container size changes
   useEffect(() => {
@@ -62,24 +93,30 @@ export function ChessGame({
   // Fix the game initialization to prevent multiple calls
   useEffect(() => {
     const initGame = async () => {
-      // Only start a new game if we don't have an active one
-      if (!currentGame?.metadata?.game_id) {
-        setIsInitializing(true);
-        try {
-          await startNewGame('single');
-        } catch (error) {
-          console.error('Failed to initialize game:', error);
-        } finally {
+              // Skip auto-initialization if restoration is in progress
+        if (skipAutoInit) {
+          setIsInitializing(false);
+          return;
+        }
+        
+        // Only start a new game if we don't have an active one
+        if (!currentGame?.metadata?.game_id) {
+          setIsInitializing(true);
+          try {
+            await startNewGame('single');
+          } catch (error) {
+            console.error('Failed to initialize game:', error);
+          } finally {
+            setIsInitializing(false);
+          }
+        } else {
           setIsInitializing(false);
         }
-      } else {
-        setIsInitializing(false);
-      }
     };
     
-    // Only run once when the component mounts
+    // Only run once when the component mounts, or when skipAutoInit changes
     initGame();
-  }, [startNewGame]); // Remove currentGame from dependencies to prevent loops
+  }, [startNewGame, skipAutoInit]); // Add skipAutoInit to dependencies
 
   // Update parent components - only trigger when game status actually changes
   useEffect(() => {
@@ -140,20 +177,12 @@ export function ChessGame({
   const onDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
     // If in view-only mode, loading, initializing, or no game state, don't allow moves
     if (viewOnly || loading || isInitializing || !currentGame?.metadata?.game_id) {
-      if (isInitializing) {
-        setMoveError("Game is initializing, please wait...");
-      } else if (loading) {
-        setMoveError("Processing previous move, please wait...");
-      } else if (!currentGame?.metadata?.game_id) {
-        setMoveError("Game not properly initialized");
-      }
-      return false;
+      return false; // Silently reject
     }
 
     // If it's not the player's turn, don't allow moves
     if (currentGame && !(currentGame as GameState).is_player_turn) {
-      setMoveError("Not your turn");
-      return false;
+      return false; // Silently reject
     }
 
     console.log('Attempting move:', {
@@ -165,7 +194,6 @@ export function ChessGame({
     });
 
     setSelectedSquare(null);
-    setMoveError(null);
 
     // Let the library handle promotion - just return true to allow the move
     // The library will call onPromotionPieceSelect if it's a promotion
@@ -196,23 +224,46 @@ export function ChessGame({
     
     const moveString = `${promoteFromSquare}${promoteToSquare}${promotionPiece}`;
 
-    console.log('🎯 Component making promotion move:', moveString, {
+    console.log('🎯 Frontend making PROMOTION move:', moveString, {
       gameId: currentGame?.metadata?.game_id || currentGame?.game_id,
       currentBoard: currentGame?.board,
+      boardPosition: boardPosition,
       loading: loading,
-      isPlayerTurn: currentGame?.is_player_turn
+      isPlayerTurn: currentGame?.is_player_turn,
+      moveHistory: currentGame?.move_history,
+      moveHistoryLength: currentGame?.move_history?.length || 0
     });
+
+    // Add state validation before making promotion move
+    if (currentGame?.board !== boardPosition) {
+      console.warn('⚠️ PROMOTION STATE MISMATCH DETECTED!');
+      console.warn('📋 currentGame.board:', currentGame?.board);
+      console.warn('📋 boardPosition:', boardPosition);
+      console.warn('🔄 Forcing board sync before promotion...');
+      setBoardPosition(currentGame?.board || boardPosition);
+    }
 
     makeMove(moveString)
       .then(() => {
         console.log('✅ Promotion move completed successfully:', moveString);
       })
-      .catch((error) => {
-        console.log('❌ Promotion move failed:', moveString, error.message);
-      });
+              .catch((error) => {
+          console.log('❌ Promotion move failed:', moveString, error.message);
+          
+          // If promotion fails, sync with server to get authoritative state
+          if (currentGame?.metadata?.game_id || currentGame?.game_id) {
+            const gameId = currentGame.metadata?.game_id || currentGame.game_id;
+            if (!error.message.includes('sync issue')) {
+              // Only sync if it wasn't already handled by the store
+              console.log('🔄 Promotion failed, syncing with server...');
+              setIsSyncing(true);
+              syncGameState(gameId).finally(() => setIsSyncing(false));
+            }
+          }
+        });
 
     return true;
-  }, [makeMove, currentGame, onMove, loading]);
+  }, [makeMove, currentGame, onMove, loading, boardPosition, syncGameState]);
 
   // Fix the onPieceDrop to NOT make moves for promotions
   const onPieceDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
@@ -232,12 +283,24 @@ export function ChessGame({
       
       const moveString = `${sourceSquare}${targetSquare}`;
       
-      console.log('🎯 Component making move:', moveString, {
+      console.log('🎯 Frontend making move:', moveString, {
         gameId: currentGame?.metadata?.game_id || currentGame?.game_id,
         currentBoard: currentGame?.board,
+        boardPosition: boardPosition,
         loading: loading,
-        isPlayerTurn: currentGame?.is_player_turn
+        isPlayerTurn: currentGame?.is_player_turn,
+        moveHistory: currentGame?.move_history,
+        moveHistoryLength: currentGame?.move_history?.length || 0
       });
+      
+      // Add state validation before making move
+      if (currentGame?.board !== boardPosition) {
+        console.warn('⚠️ STATE MISMATCH DETECTED!');
+        console.warn('📋 currentGame.board:', currentGame?.board);
+        console.warn('📋 boardPosition:', boardPosition);
+        console.warn('🔄 Forcing board sync...');
+        setBoardPosition(currentGame?.board || boardPosition);
+      }
       
       makeMove(moveString)
         .then(() => {
@@ -245,11 +308,22 @@ export function ChessGame({
         })
         .catch((error) => {
           console.log('❌ Move failed:', moveString, error.message);
+          
+          // If move fails, sync with server to get authoritative state
+          if (currentGame?.metadata?.game_id || currentGame?.game_id) {
+            const gameId = currentGame.metadata?.game_id || currentGame.game_id;
+            if (!error.message.includes('sync issue')) {
+              // Only sync if it wasn't already handled by the store
+              console.log('🔄 Move failed, syncing with server...');
+              setIsSyncing(true);
+              syncGameState(gameId).finally(() => setIsSyncing(false));
+            }
+          }
         });
     }
     
     return result;
-  }, [onDrop, makeMove, currentGame, onMove, loading]);
+  }, [onDrop, makeMove, currentGame, onMove, loading, boardPosition, syncGameState]);
 
   const onSquareClick = useCallback((square: Square) => {
     if (!viewOnly && !isInitializing && !loading) {
@@ -258,16 +332,7 @@ export function ChessGame({
     }
   }, [viewOnly, isInitializing, loading]);
 
-  // Add auto-dismiss for error messages
-  useEffect(() => {
-    if (moveError) {
-      const timer = setTimeout(() => {
-        setMoveError(null);
-      }, 5000); // Auto-dismiss after 5 seconds
 
-      return () => clearTimeout(timer);
-    }
-  }, [moveError]);
 
   // Add right-click handler to cancel dragging
   useEffect(() => {
@@ -347,7 +412,7 @@ export function ChessGame({
       }
     };
 
-    const handleMouseUp = (e: MouseEvent) => {
+    const handleMouseUp = (_e: MouseEvent) => {
       // Clear dragging state on mouse up
       if (isDragging) {
         setIsDragging(false);
@@ -381,24 +446,41 @@ export function ChessGame({
   }, [isDragging, boardPosition, currentGame?.board]);
 
   return (
-    <div ref={containerRef} className="w-full h-full relative">
-      {/* Move error to bottom-right corner as a toast */}
-      {moveError && (
-        <div className="absolute bottom-4 right-4 z-20 bg-red-500 text-white text-xs px-3 py-2 rounded-lg shadow-lg max-w-xs">
-          {moveError}
-          <button 
-            onClick={() => setMoveError(null)}
-            className="ml-2 text-white hover:text-gray-200"
+    <>
+      {/* Manual sync button */}
+      {!viewOnly && currentGame?.metadata?.game_id && (
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={() => {
+              const gameId = currentGame.metadata?.game_id || currentGame.game_id;
+              if (gameId && !isSyncing) {
+                console.log('🔄 Manual sync requested');
+                setIsSyncing(true);
+                syncGameState(gameId).finally(() => setIsSyncing(false));
+              }
+            }}
+            disabled={isSyncing}
+            className={`${
+              isSyncing 
+                ? 'bg-blue-600 cursor-not-allowed' 
+                : 'bg-gray-600 hover:bg-gray-700'
+            } text-white text-xs px-3 py-1 rounded shadow-lg flex items-center gap-1`}
+            title="Sync with server if moves seem out of sync"
           >
-            ×
+            {isSyncing ? '🔄 Syncing...' : '🔄 Sync'}
           </button>
         </div>
       )}
       
+    <div ref={containerRef} className="w-full h-full relative">
+
+      
       {/* Loading/initializing message at top but smaller */}
-      {(isInitializing || loading) && (
+      {(isInitializing || loading || isSyncing) && (
         <div className="absolute top-2 left-1/2 transform -translate-x-1/2 z-10 bg-blue-500 text-white text-xs px-3 py-1 rounded">
-          {isInitializing ? 'Initializing game...' : 'Processing move...'}
+          {isInitializing ? 'Initializing game...' : 
+           isSyncing ? 'Syncing with server...' : 
+           'Processing move...'}
         </div>
       )}
       
@@ -410,7 +492,10 @@ export function ChessGame({
         boardWidth={boardWidth}
         customBoardStyle={{
           borderRadius: '4px',
-          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)',
+          boxShadow: isPlayerInCheck 
+            ? '0 0 0 4px #ef4444, 0 2px 8px rgba(0, 0, 0, 0.2)' 
+            : '0 2px 8px rgba(0, 0, 0, 0.2)',
+          transition: 'box-shadow 0.3s ease-in-out',
         }}
         customDarkSquareStyle={{ 
           backgroundColor: boardTheme === 'classic' ? '#b58863' : '#70a2a3' 
@@ -427,5 +512,6 @@ export function ChessGame({
         }}
       />
     </div>
+    </>
   );
 } 

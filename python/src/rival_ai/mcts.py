@@ -201,9 +201,7 @@ class MCTS:
     def _move_to_move_idx(self, move: chess.Move) -> int:
         """Convert a chess move to a unique index in the range [0, 5311].
         
-        The index is calculated as:
-        - For non-promotion moves: from_square * 64 + to_square
-        - For promotion moves: 4096 + (promotion_piece_type - 2) * 64 + (from_square * 8 + to_square % 8)
+        Uses FIXED compact encoding that fits within the policy vector bounds.
         
         Args:
             move: The chess move to convert
@@ -211,22 +209,39 @@ class MCTS:
         Returns:
             Integer index in range [0, 5311]
         """
-        # Calculate base index for the move
-        from_square = move.from_square
-        to_square = move.to_square
-        
         if move.promotion:
-            # For promotion moves, we only consider moves to the last rank
-            # Each promotion type (knight=0, bishop=1, rook=2, queen=3) gets 8 slots
-            # We use from_square * 8 + to_square % 8 to get a unique index for each promotion move
-            promotion_base = 4096  # Start of promotion moves
-            promotion_type = move.promotion - 2  # Convert to 0-3 range
-            promotion_offset = promotion_type * 64  # Each type gets 64 slots
-            move_offset = (from_square * 8) + (to_square % 8)  # Unique index for each promotion move
-            return promotion_base + promotion_offset + move_offset
+            # 🔥 FIXED: Use compact encoding that fits in available slots
+            piece_type = {
+                chess.KNIGHT: 0,
+                chess.BISHOP: 1, 
+                chess.ROOK: 2,
+                chess.QUEEN: 3
+            }.get(move.promotion, 3)
+            
+            from_file = move.from_square % 8
+            from_rank = move.from_square // 8
+            to_file = move.to_square % 8
+            to_rank = move.to_square // 8
+            
+            if to_file == from_file:
+                direction = 0
+            elif to_file == from_file - 1:
+                direction = 1
+            elif to_file == from_file + 1:
+                direction = 2
+            else:
+                return 0  # Invalid promotion
+            
+            if from_rank == 6 and to_rank == 7:
+                side_offset = 0
+            elif from_rank == 1 and to_rank == 0:
+                side_offset = 96
+            else:
+                return 0  # Invalid promotion
+            
+            return 4096 + side_offset + (from_file * 12) + (direction * 4) + piece_type
         else:
-            # For regular moves, just use the base index
-            return from_square * 64 + to_square
+            return move.from_square * 64 + move.to_square
     
     def _move_idx_to_move(self, move_idx: int, board: chess.Board) -> Optional[chess.Move]:
         """Convert a move index back to a chess move.
@@ -247,9 +262,11 @@ class MCTS:
             to_square = move_idx % 64
             move = chess.Move(from_square, to_square)
         else:
-            # Promotion move
-            base_idx = (move_idx - 4096) // 4
-            promotion_type = (move_idx - 4096) % 4 + 2  # Convert back to piece type (2-5)
+            # Promotion move - use consistent PAG encoding
+            # Formula: 4096 + (from_square * 64 + to_square) * 4 + promotion_piece_type - 1
+            promotion_idx = move_idx - 4096
+            base_idx = promotion_idx // 4
+            promotion_type = (promotion_idx % 4) + 1  # Convert back to piece type (1-4)
             from_square = base_idx // 64
             to_square = base_idx % 64
             move = chess.Move(from_square, to_square, promotion=promotion_type)

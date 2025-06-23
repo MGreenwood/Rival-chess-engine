@@ -9,16 +9,33 @@ const TrainModel: React.FC = () => {
   // Removed loading state since Chessboard component handles move loading
   const [gameOverLogged, setGameOverLogged] = useState(false);
   const [mobileTab, setMobileTab] = useState<'stats' | 'about'>('stats');
+  const [isRestoring, setIsRestoring] = useState(true); // Prevent auto-game creation during restore
 
-  // Initialize store only once
+  // 🔥 OPTIMIZED: Immediate restoration on page load - no waiting for store init
   useEffect(() => {
-    useStore.getState().init();
-  }, []); // Empty dependency array - only run once
-
-  // Set mode to single player when this page loads
-  useEffect(() => {
-    uiActions.setCurrentMode('single');
-  }, [uiActions]);
+    const immediateRestore = async () => {
+      try {
+        console.log('🚀 IMMEDIATE restoration attempt starting...');
+        uiActions.setCurrentMode('single');
+        
+        // Try to restore IMMEDIATELY - don't wait for store init
+        const restored = await gameActions.restoreGameFromStorage('single');
+        if (restored) {
+          console.log('⚡ IMMEDIATE restoration SUCCESS!');
+        } else {
+          console.log('📭 No game to restore, allowing normal initialization');
+        }
+        
+        // Now initialize store (stats, etc.) in parallel
+        useStore.getState().init();
+      } finally {
+        // Always clear restoration flag so Chessboard can proceed
+        setIsRestoring(false);
+      }
+    };
+    
+    immediateRestore();
+  }, []); // Run once immediately on mount
 
   // Reset game over logged flag when a new game starts
   useEffect(() => {
@@ -66,6 +83,7 @@ const TrainModel: React.FC = () => {
                 boardTheme={preferences.boardTheme}
                 initialPosition={currentGame?.board}
                 viewOnly={false}
+                skipAutoInit={isRestoring} // Prevent auto-initialization during restoration
               />
               {currentGame && !currentGame.is_player_turn && currentGame.status === 'active' && (
                 <div className="absolute inset-0 bg-chess-darker bg-opacity-50 flex items-center justify-center">
