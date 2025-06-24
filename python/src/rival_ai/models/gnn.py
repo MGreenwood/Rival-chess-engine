@@ -230,7 +230,10 @@ class ChessGNN(nn.Module):
         num_layers: int = 4,
         num_heads: int = 4,
         dropout: float = 0.1,
-        use_residual: bool = True
+        use_residual: bool = True,
+        piece_dim: Optional[int] = None,
+        critical_square_dim: Optional[int] = None,
+        use_ultra_dense_pag: bool = True
     ):
         """Initialize the model.
         
@@ -240,12 +243,27 @@ class ChessGNN(nn.Module):
             num_heads: Number of attention heads
             dropout: Dropout rate
             use_residual: Whether to use residual connections
+            piece_dim: Input dimension for piece features (auto-detected if None)
+            critical_square_dim: Input dimension for critical square features (auto-detected if None)
+            use_ultra_dense_pag: Whether to expect ultra-dense PAG features
         """
         super().__init__()
         
-        # Input dimensions
-        self.piece_dim = 12  # 6 piece types * 2 colors
-        self.critical_square_dim = 1  # Binary feature for critical squares
+        # Input dimensions - support both ultra-dense PAG and basic features
+        if use_ultra_dense_pag:
+            # Ultra-dense PAG dimensions from Rust
+            self.piece_dim = piece_dim if piece_dim is not None else 350  # 350+ features from Rust PAG
+            self.critical_square_dim = critical_square_dim if critical_square_dim is not None else 95  # 95+ features
+            logger.info(f"🚀 Initializing ChessGNN with ULTRA-DENSE PAG features:")
+            logger.info(f"   Piece features: {self.piece_dim} dimensions")
+            logger.info(f"   Critical square features: {self.critical_square_dim} dimensions")
+        else:
+            # Basic feature dimensions (fallback)
+            self.piece_dim = piece_dim if piece_dim is not None else 12  # 6 piece types * 2 colors
+            self.critical_square_dim = critical_square_dim if critical_square_dim is not None else 1  # Binary feature
+            logger.info(f"⚠️ Initializing ChessGNN with BASIC features:")
+            logger.info(f"   Piece features: {self.piece_dim} dimensions")
+            logger.info(f"   Square features: {self.critical_square_dim} dimensions")
         
         # Model parameters
         self.hidden_dim = hidden_dim
@@ -253,10 +271,15 @@ class ChessGNN(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.use_residual = use_residual
+        self.use_ultra_dense_pag = use_ultra_dense_pag
         
-        # Node type embeddings
+        # Node type embeddings - flexible for different input dimensions
         self.piece_embedding = nn.Linear(self.piece_dim, hidden_dim)
         self.square_embedding = nn.Linear(self.critical_square_dim, hidden_dim)
+        
+        logger.info(f"   Hidden dimension: {hidden_dim}")
+        logger.info(f"   GNN layers: {num_layers}")
+        logger.info(f"   Attention heads: {num_heads}")
         
         # GNN layers
         self.convs = nn.ModuleList()
@@ -341,59 +364,93 @@ class ChessGNN(nn.Module):
         Args:
             data: Heterogeneous graph data containing:
                 - piece nodes with features [num_pieces, piece_dim]
-                - square nodes with features [num_squares, critical_square_dim]
-                - edge_index_dict with 'piece_to_square' and 'square_to_square' edges
+                - square/critical_square nodes with features [num_squares, square_dim]
+                - edge_index_dict with various edge types
                 
         Returns:
             Tuple of (policy_logits, value)
         """
+        # Detect node types - handle both 'square' and 'critical_square' naming
+        square_node_type = None
+        if 'critical_square' in data.node_types:
+            square_node_type = 'critical_square'
+        elif 'square' in data.node_types:
+            square_node_type = 'square'
+        else:
+            raise ValueError(f"Expected 'square' or 'critical_square' node type, but found: {data.node_types}")
+        
         # Get node features and apply embeddings
         piece_x = self.piece_embedding(data['piece'].x)
-        square_x = self.square_embedding(data['square'].x)
+        square_x = self.square_embedding(data[square_node_type].x)
         
         # Store node features in dictionary
         x_dict = {
             'piece': piece_x,
-            'square': square_x
+            square_node_type: square_x
         }
+        
+        # Detect edge types - handle different naming conventions
+        piece_to_square_edge = None
+        square_to_square_edge = None
+        
+        for edge_type in data.edge_types:
+            src, rel, dst = edge_type
+            if src == 'piece' and dst == square_node_type:
+                piece_to_square_edge = edge_type
+            elif src == square_node_type and dst == square_node_type:
+                square_to_square_edge = edge_type
+        
+        logger.debug(f"Using node types: piece, {square_node_type}")
+        logger.debug(f"Using edge types: {piece_to_square_edge}, {square_to_square_edge}")
         
         # Process through GNN layers
         for i, (conv, norm) in enumerate(zip(self.convs, self.norms)):
             # First layer connects pieces to squares
-            if i == 0:
+            if i == 0 and piece_to_square_edge is not None:
                 # Get edge index for piece to square connections
-                edge_index = data.edge_index_dict[('piece', 'to', 'square')]
+                edge_index = data.edge_index_dict[piece_to_square_edge]
                 # Ensure edge indices are contiguous and in the correct range
                 edge_index = edge_index.contiguous()
+                
                 # Verify edge indices are valid
-                assert edge_index[0].max() < piece_x.size(0), f"Invalid source node index: {edge_index[0].max()} >= {piece_x.size(0)}"
-                assert edge_index[1].max() < square_x.size(0), f"Invalid target node index: {edge_index[1].max()} >= {square_x.size(0)}"
-                # Process piece to square connections
-                square_x = conv((piece_x, square_x), edge_index)
-                square_x = norm(square_x)
-                square_x = F.relu(square_x)
-                square_x = F.dropout(square_x, p=self.dropout, training=self.training)
-                x_dict['square'] = square_x
-            else:
+                if edge_index.numel() > 0:  # Only check if edges exist
+                    assert edge_index[0].max() < piece_x.size(0), f"Invalid source node index: {edge_index[0].max()} >= {piece_x.size(0)}"
+                    assert edge_index[1].max() < square_x.size(0), f"Invalid target node index: {edge_index[1].max()} >= {square_x.size(0)}"
+                    
+                    # Process piece to square connections
+                    square_x = conv((piece_x, square_x), edge_index)
+                    square_x = norm(square_x)
+                    square_x = F.relu(square_x)
+                    square_x = F.dropout(square_x, p=self.dropout, training=self.training)
+                    x_dict[square_node_type] = square_x
+                else:
+                    logger.warning(f"No edges found for {piece_to_square_edge}")
+                    
+            elif i > 0 and square_to_square_edge is not None:
                 # Get edge index for square to square connections
-                edge_index = data.edge_index_dict[('square', 'to', 'square')]
+                edge_index = data.edge_index_dict[square_to_square_edge]
                 # Ensure edge indices are contiguous and in the correct range
                 edge_index = edge_index.contiguous()
+                
                 # Verify edge indices are valid
-                assert edge_index[0].max() < square_x.size(0), f"Invalid source node index: {edge_index[0].max()} >= {square_x.size(0)}"
-                assert edge_index[1].max() < square_x.size(0), f"Invalid target node index: {edge_index[1].max()} >= {square_x.size(0)}"
-                # Process square to square connections
-                square_x = conv(square_x, edge_index)
-                square_x = norm(square_x)
-                square_x = F.relu(square_x)
-                square_x = F.dropout(square_x, p=self.dropout, training=self.training)
-                x_dict['square'] = square_x
+                if edge_index.numel() > 0:  # Only check if edges exist
+                    assert edge_index[0].max() < square_x.size(0), f"Invalid source node index: {edge_index[0].max()} >= {square_x.size(0)}"
+                    assert edge_index[1].max() < square_x.size(0), f"Invalid target node index: {edge_index[1].max()} >= {square_x.size(0)}"
+                    
+                    # Process square to square connections
+                    square_x = conv(square_x, edge_index)
+                    square_x = norm(square_x)
+                    square_x = F.relu(square_x)
+                    square_x = F.dropout(square_x, p=self.dropout, training=self.training)
+                    x_dict[square_node_type] = square_x
+                else:
+                    logger.warning(f"No edges found for {square_to_square_edge}")
         
         # Get final square features
-        square_features = x_dict['square']
+        square_features = x_dict[square_node_type]
         
         # Global pooling over all squares
-        global_features = global_mean_pool(square_features, data['square'].batch)
+        global_features = global_mean_pool(square_features, data[square_node_type].batch)
         
         # Policy and value heads
         policy_logits = self.policy_head(global_features)
@@ -431,8 +488,8 @@ class ChessGNN(nn.Module):
             # Create chess board from FEN
             board = chess.Board(fen_string)
             
-            # Convert board to HeteroData
-            data = board_to_hetero_data(board)
+            # Convert board to HeteroData using ultra-dense PAG if available
+            data = board_to_hetero_data(board, use_dense_pag=self.use_ultra_dense_pag)
             
             # Move data to the same device as the model
             device = next(self.parameters()).device

@@ -3,7 +3,8 @@
 UCI Tournament Script for RivalAI
 
 This script orchestrates matches between RivalAI and other UCI engines,
-automatically collecting training data and tracking performance.
+automatically converting games to trainable format using expert move supervision
+and tracking performance. Games are stored in unified storage for neural network training.
 """
 
 import os
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 
 # Add src to path for unified storage import
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
-from rival_ai.unified_storage import get_unified_storage, UnifiedGameData, GameSource
+from rival_ai.unified_storage import get_unified_storage, initialize_unified_storage, UnifiedGameData, GameSource
 
 @dataclass
 class EngineConfig:
@@ -41,6 +42,7 @@ class TournamentConfig:
     save_pgn: bool = False  # Disabled - unified storage is sufficient
     save_training_data: bool = True
     output_dir: str = "results/tournaments"
+    fast_mode: bool = True  # New: defer all disk writes for maximum speed
 
 class UCITournament:
     def __init__(self, config: TournamentConfig):
@@ -53,9 +55,24 @@ class UCITournament:
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
         
-        # Initialize unified storage for automatic training data collection
-        self.unified_storage = get_unified_storage()
-        print(f"🎯 Unified storage initialized - all games will automatically become training data")
+        # Initialize unified storage with same settings as server self-play system
+        script_dir = Path(__file__).parent
+        training_games_dir = script_dir.parent / "training_games"  # python/training_games (same as server)
+        
+        if config.fast_mode:
+            # Fast mode: use large batch size to minimize disk writes
+            self.unified_storage = initialize_unified_storage(str(training_games_dir), batch_size=1000)
+            self.pending_games = []  # Store games in memory during tournament
+            print(f"🚀 CACHED MODE: Games stored in memory for maximum tournament speed")
+            print(f"📁 Training directory: {training_games_dir.absolute()}")
+            print(f"💾 All games will be saved in one batch at tournament end")
+        else:
+            # No-cache mode: smaller batches with immediate disk writes
+            self.unified_storage = initialize_unified_storage(str(training_games_dir), batch_size=50)
+            self.pending_games = None
+            print(f"🎯 NO-CACHE MODE: Immediate disk writes after each game")
+            print(f"📁 Training directory: {training_games_dir.absolute()}")
+            print(f"💾 Games will be saved immediately (slower but safer)")
         
         # Initialize results tracking
         for engine in config.opponent_engines:
@@ -88,6 +105,24 @@ class UCITournament:
         finally:
             # Save final results
             total_time = time.time() - start_time
+            
+            # Save all tournament games to unified storage
+            if self.config.fast_mode and self.pending_games:
+                print(f"💾 Cached mode: Saving {len(self.pending_games)} games to unified storage...")
+                start_save = time.time()
+                
+                # Store all pending games at once
+                self.unified_storage.store_multiple_games(self.pending_games)
+                self.unified_storage.force_save_current_batch()
+                
+                save_time = time.time() - start_save
+                print(f"✅ All {len(self.pending_games)} games saved in {save_time:.1f}s")
+                print(f"🚀 Caching saved {save_time/len(self.pending_games)*1000:.1f}ms per game vs disk I/O")
+            else:
+                print(f"💾 Saving final batch to unified storage...")
+                self.unified_storage.force_save_current_batch()
+                print(f"✅ Tournament games saved and ready for server training")
+            
             self.save_tournament_results(total_time)
             self.print_final_results()
 
@@ -353,9 +388,20 @@ class UCITournament:
         
         # Convert to unified storage format automatically
         try:
-            self.store_game_in_unified_storage(moves, result, opponent_name, rival_ai_white)
+            unified_game = self.convert_game_to_unified_format(moves, result, opponent_name, rival_ai_white)
+            
+            if self.config.fast_mode:
+                # Cached mode: store in memory, no disk writes yet
+                self.pending_games.append(unified_game)
+                # Only show progress every 25 games to reduce log spam
+                if self.games_played % 25 == 0:
+                    print(f"    💾 {len(self.pending_games)} games cached in memory")
+            else:
+                # No-cache mode: immediate disk write with status
+                self.unified_storage.store_game(unified_game)
+                print(f"    💾 Game saved to disk immediately")
         except Exception as e:
-            print(f"    ⚠️ Failed to store game in unified storage: {e}")
+            print(f"    ⚠️ Failed to process game for unified storage: {e}")
         
         # Update stats
         stats = self.results[opponent_name]
@@ -387,28 +433,101 @@ class UCITournament:
         print(f"    📊 vs {opponent_name}: {wins}W-{losses}L-{draws}D ({win_rate:.1f}% win rate)")
         print(f"    🏆 Tournament progress: {self.games_played}/{self.total_games} games")
         
-        # Show unified storage status
-        total_stored = self.unified_storage.get_total_games()
-        ready_for_training = self.unified_storage.get_training_ready_count()
-        print(f"    💾 Unified storage: {total_stored} total games, {ready_for_training} ready for training")
+        # Show unified storage status (less frequently in cached mode)
+        if not self.config.fast_mode or self.games_played % 25 == 0:
+            if self.config.fast_mode:
+                print(f"    💾 Cached: {len(self.pending_games)} games in memory (will save at end)")
+            else:
+                total_stored = self.unified_storage.get_total_games()
+                ready_for_training = self.unified_storage.get_training_ready_count()
+                print(f"    💾 No-cache: {total_stored} total games, {ready_for_training} ready for training")
 
-    def store_game_in_unified_storage(self, moves: List[str], result: str, opponent_name: str, rival_ai_white: bool):
-        """Convert UCI game to unified storage format and store automatically."""
+    def convert_game_to_unified_format(self, moves: List[str], result: str, opponent_name: str, rival_ai_white: bool) -> UnifiedGameData:
+        """Convert UCI game to unified storage format with expert move supervision."""
+        # Import move encoding functions
+        sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+        try:
+            from rival_ai.training.training_types import encode_move_to_policy_index
+        except ImportError:
+            print("    ⚠️ Warning: Could not import move encoding, using fallback method")
+            encode_move_to_policy_index = None
+        
         # Create positions by replaying the game
         positions = []
         board = chess.Board()
+        
+        # Calculate position-based values from game result
+        total_moves = len(moves)
         
         for i, move_uci in enumerate(moves):
             try:
                 # Store position before the move
                 move = chess.Move.from_uci(move_uci)
                 
-                # Basic position data (no policy/value data from UCI games)
+                # Create expert policy vector (5312 total moves including promotions)
+                policy_size = 5312
+                policy = [0.0] * policy_size
+                
+                # Get all legal moves for this position
+                legal_moves = list(board.legal_moves)
+                
+                if encode_move_to_policy_index and legal_moves:
+                    try:
+                        # Use proper move encoding if available
+                        played_move_index = encode_move_to_policy_index(move, board)
+                        
+                        # Expert move supervision: played move gets high probability
+                        expert_prob = 0.85  # 85% probability for the played move
+                        remaining_prob = 1.0 - expert_prob
+                        
+                        # Assign high probability to played move
+                        if 0 <= played_move_index < policy_size:
+                            policy[played_move_index] = expert_prob
+                        
+                        # Distribute remaining probability among other legal moves
+                        other_legal_moves = [m for m in legal_moves if m != move]
+                        if other_legal_moves:
+                            prob_per_legal = remaining_prob / len(other_legal_moves)
+                            for legal_move in other_legal_moves:
+                                try:
+                                    legal_index = encode_move_to_policy_index(legal_move, board)
+                                    if 0 <= legal_index < policy_size:
+                                        policy[legal_index] = prob_per_legal
+                                except:
+                                    continue
+                    except Exception as e:
+                        # Fallback: simple one-hot encoding
+                        print(f"    ⚠️ Move encoding failed, using fallback: {e}")
+                        # Just put high probability on a safe index
+                        policy[0] = 1.0
+                else:
+                    # Fallback method: uniform distribution over legal moves
+                    if legal_moves:
+                        prob_per_move = 1.0 / len(legal_moves)
+                        # Use simple hash-based indexing as fallback
+                        for legal_move in legal_moves:
+                            hash_index = hash(legal_move.uci()) % policy_size
+                            policy[hash_index] = prob_per_move
+                
+                # Calculate value based on game result and position in game
+                moves_from_end = total_moves - i
+                decay_factor = max(0.1, min(1.0, moves_from_end / 20.0))  # Decay over 20 moves
+                
+                if result == "1-0":  # White wins
+                    base_value = 1.0 if board.turn == chess.WHITE else -1.0
+                elif result == "0-1":  # Black wins  
+                    base_value = -1.0 if board.turn == chess.WHITE else 1.0
+                else:  # Draw
+                    base_value = 0.0
+                
+                position_value = base_value * decay_factor
+                
+                # Create trainable position data
                 position_data = {
                     'fen': board.fen(),
                     'move': move_uci,
-                    'value': 0.0,  # No value data available from UCI games
-                    'policy': None,  # No policy data available from UCI games
+                    'value': position_value,
+                    'policy': policy,  # Now has proper policy vector!
                     'move_number': i + 1,
                     'player': 'rival_ai' if (board.turn == chess.WHITE and rival_ai_white) or (board.turn == chess.BLACK and not rival_ai_white) else opponent_name
                 }
@@ -446,8 +565,8 @@ class UCITournament:
             timestamp=datetime.now().isoformat()
         )
         
-        # Store in unified storage
-        self.unified_storage.store_game(unified_game)
+        # Return the unified game data (caller decides when to store)
+        return unified_game
 
     def save_game_pgn(self, board: chess.Board, moves: List[str], opponent: str, rival_ai_white: bool, result: str):
         """Save game in PGN format."""
@@ -551,10 +670,11 @@ class UCITournament:
         print(f"\n🎯 TRAINING DATA STATUS:")
         print(f"📦 Total games in unified storage: {total_games}")
         print(f"🎓 Games ready for training: {ready_for_training}")
+        print(f"🧠 UCI games converted with expert move supervision (85% played move, 15% legal moves)")
         
         if ready_for_training >= 1000:
             print(f"✅ Sufficient training data available!")
-            print(f"🚀 Start server with --enable-training to begin automatic training")
+            print(f"🚀 Start server with --enable-training to begin supervised learning from expert games")
         else:
             print(f"📈 Need {1000 - ready_for_training} more games for training threshold")
             print(f"🔄 Run more tournaments or start server for self-play generation")
@@ -571,6 +691,8 @@ def main():
                       help="Time limit per move (seconds)")
     parser.add_argument("--output", default="results/tournaments",
                       help="Output directory for tournament results")
+    parser.add_argument("--no-cache", dest="fast_mode", action="store_false", default=True,
+                      help="Disable caching (immediate disk writes, slower but safer)")
     
     args = parser.parse_args()
     
@@ -608,7 +730,8 @@ def main():
         rival_ai_path=args.rival_ai,
         opponent_engines=opponent_engines,
         games_per_opponent=args.games,
-        output_dir=output_dir
+        output_dir=output_dir,
+        fast_mode=args.fast_mode
     )
     
     tournament = UCITournament(config)

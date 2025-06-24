@@ -74,18 +74,27 @@ class UnifiedGameStorage:
     def _get_next_batch_number(self) -> int:
         """Get the next batch number"""
         existing_batches = list(self.unified_dir.glob("batch_*.json.gz"))
+        logger.debug(f"Looking for batches in: {self.unified_dir}")
+        logger.debug(f"Found {len(existing_batches)} existing batches: {[b.name for b in existing_batches]}")
+        
         if not existing_batches:
+            logger.debug("No existing batches found, starting from 1")
             return 1
         
         batch_numbers = []
         for batch_file in existing_batches:
             try:
-                num_str = batch_file.stem.split('_')[1]
+                # Remove .json.gz extensions and parse number
+                name_without_extensions = batch_file.name.replace('.json.gz', '')
+                num_str = name_without_extensions.split('_')[1]
                 batch_numbers.append(int(num_str))
             except (IndexError, ValueError):
+                logger.warning(f"Failed to parse batch number from: {batch_file.name}")
                 continue
         
-        return max(batch_numbers, default=0) + 1
+        next_batch = max(batch_numbers, default=0) + 1
+        logger.debug(f"Batch numbers found: {batch_numbers}, next batch: {next_batch}")
+        return next_batch
     
     def store_game(self, game_data: UnifiedGameData) -> None:
         """Store a game in the unified system"""
@@ -163,8 +172,18 @@ class UnifiedGameStorage:
     
     def get_training_ready_count(self) -> int:
         """Get number of games ready for training (in complete batches)"""
-        complete_batches = len(list(self.unified_dir.glob("batch_*.json.gz")))
-        return complete_batches * self.batch_size
+        total_games = 0
+        
+        # Count actual games in batch files
+        for batch_file in self.unified_dir.glob("batch_*.json.gz"):
+            try:
+                with gzip.open(batch_file, 'rt', encoding='utf-8') as f:
+                    batch_data = json.load(f)
+                    total_games += batch_data.get("game_count", 0)
+            except Exception as e:
+                logger.warning(f"Could not read batch {batch_file}: {e}")
+        
+        return total_games
     
     def prepare_training_data(self, max_batches: Optional[int] = None) -> List[Path]:
         """Prepare training data by collecting batch files"""

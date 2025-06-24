@@ -6,10 +6,10 @@ import { formatDistanceToNow, isValid } from 'date-fns';
 const ModelStats: React.FC = memo(() => {
   const { modelStats, recentGames, currentMode, uiActions } = useStore();
   
-  // Refresh stats when mode changes
+  // Refresh stats when mode changes (don't include uiActions in deps - it changes every render)
   useEffect(() => {
     uiActions.loadStatsForMode(currentMode);
-  }, [currentMode, uiActions]);
+  }, [currentMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Memoize filtered games to prevent excessive re-computation
   const filteredGames = useMemo(() => {

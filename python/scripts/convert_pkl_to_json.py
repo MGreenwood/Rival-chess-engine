@@ -31,41 +31,102 @@ def convert_game_record_to_dict(game_record: Any) -> Dict[str, Any]:
         # Extract basic game information
         positions = []
         
-        # Convert states to positions with moves
-        for i in range(len(game_record.states) - 1):  # -1 because last state has no move
+        # Safety checks for array lengths
+        num_states = len(game_record.states) if hasattr(game_record, 'states') else 0
+        num_moves = len(game_record.moves) if hasattr(game_record, 'moves') else 0
+        num_values = len(game_record.values) if hasattr(game_record, 'values') else 0
+        num_policies = len(game_record.policies) if hasattr(game_record, 'policies') else 0
+        
+        if num_states == 0:
+            logger.warning("GameRecord has no states")
+            return []
+        
+        # Convert states to positions with moves (use minimum length for safety)
+        max_positions = min(num_states - 1, num_moves, num_values, num_policies) if num_states > 0 else 0
+        
+        for i in range(max_positions):
             current_state = game_record.states[i]
-            next_state = game_record.states[i + 1]
+            next_state = game_record.states[i + 1] if i + 1 < num_states else None
             
             # Get the move that was made
-            if isinstance(current_state, chess.Board) and isinstance(next_state, chess.Board):
-                # Find the move that was made
-                move = None
-                for legal_move in current_state.legal_moves:
-                    temp_board = current_state.copy()
-                    temp_board.push(legal_move)
-                    if temp_board.fen() == next_state.fen():
-                        move = legal_move
-                        break
+            move = None
+            if isinstance(current_state, chess.Board):
+                # Try to get move from moves array first
+                if i < num_moves and hasattr(game_record.moves[i], 'uci'):
+                    move = game_record.moves[i]
+                elif next_state and isinstance(next_state, chess.Board):
+                    # Find the move that was made by comparing board states
+                    for legal_move in current_state.legal_moves:
+                        temp_board = current_state.copy()
+                        temp_board.push(legal_move)
+                        if temp_board.fen() == next_state.fen():
+                            move = legal_move
+                            break
                 
                 if move is None:
-                    logger.warning(f"Could not find move between states {i} and {i+1}")
+                    logger.warning(f"Could not find move for position {i}")
                     continue
                 
-                # Create position dictionary
+                # Get policy data for this position
+                policy = None
+                if i < num_policies:
+                    policy_tensor = game_record.policies[i]
+                    if hasattr(policy_tensor, 'tolist'):
+                        policy = policy_tensor.tolist()
+                    elif hasattr(policy_tensor, 'numpy'):
+                        policy = policy_tensor.numpy().tolist()
+                    elif isinstance(policy_tensor, (list, np.ndarray)):
+                        policy = policy_tensor
+                
+                # Get value for this position
+                value = 0.0
+                if i < num_values:
+                    value_data = game_record.values[i]
+                    if hasattr(value_data, 'item'):
+                        value = float(value_data.item())
+                    else:
+                        value = float(value_data)
+                
+                # Create position dictionary (enhanced dataset format)
                 position = {
                     'fen': current_state.fen(),
                     'move': move.uci(),
-                    'value': float(game_record.values[i].item() if hasattr(game_record.values[i], 'item') else game_record.values[i])
+                    'policy': policy,  # Required for enhanced dataset
+                    'value': value
                 }
                 positions.append(position)
         
-        # Add the final position without a move
-        final_state = game_record.states[-1]
-        if isinstance(final_state, chess.Board):
-            positions.append({
-                'fen': final_state.fen(),
-                'value': float(game_record.values[-1].item() if hasattr(game_record.values[-1], 'item') else game_record.values[-1])
-            })
+        # Add the final position (if we have states remaining)
+        if num_states > max_positions:
+            final_state = game_record.states[-1]
+            if isinstance(final_state, chess.Board):
+                final_policy = None
+                final_index = num_states - 1
+                
+                # Get final policy if available
+                if final_index < num_policies:
+                    policy_tensor = game_record.policies[final_index]
+                    if hasattr(policy_tensor, 'tolist'):
+                        final_policy = policy_tensor.tolist()
+                    elif hasattr(policy_tensor, 'numpy'):
+                        final_policy = policy_tensor.numpy().tolist()
+                    elif isinstance(policy_tensor, (list, np.ndarray)):
+                        final_policy = policy_tensor
+                
+                # Get final value
+                final_value = 0.0
+                if num_values > 0:
+                    final_value_data = game_record.values[-1]
+                    if hasattr(final_value_data, 'item'):
+                        final_value = float(final_value_data.item())
+                    else:
+                        final_value = float(final_value_data)
+                
+                positions.append({
+                    'fen': final_state.fen(),
+                    'policy': final_policy,
+                    'value': final_value
+                })
         
         return positions
     

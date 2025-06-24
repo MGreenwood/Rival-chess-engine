@@ -212,4 +212,53 @@ class GameRecordTuple(NamedTuple):
     policies: List[torch.Tensor]  # Policy distributions
     values: List[float]  # Value predictions
     result: GameResult   # Game result
-    num_moves: int       # Number of moves in the game 
+    num_moves: int       # Number of moves in the game
+
+def encode_move_to_policy_index(move: chess.Move, board: chess.Board = None) -> int:
+    """Convert a chess move to its policy index using the same encoding as training.
+    
+    This function provides the same move encoding logic used throughout the training
+    system, ensuring consistency between UCI tournament data and self-play data.
+    
+    Args:
+        move: Chess move to encode
+        board: Chess board (optional, for compatibility)
+        
+    Returns:
+        Index in the policy vector (0-5311)
+    """
+    if move.promotion:
+        # Use the same compact encoding as GameRecord._move_to_index
+        piece_type = {
+            chess.KNIGHT: 0,
+            chess.BISHOP: 1, 
+            chess.ROOK: 2,
+            chess.QUEEN: 3
+        }.get(move.promotion, 3)
+        
+        from_file = move.from_square % 8
+        from_rank = move.from_square // 8
+        to_file = move.to_square % 8
+        to_rank = move.to_square // 8
+        
+        if to_file == from_file:
+            direction = 0  # Straight promotion
+        elif to_file == from_file - 1:
+            direction = 1  # Capture left
+        elif to_file == from_file + 1:
+            direction = 2  # Capture right
+        else:
+            return 4096  # Invalid promotion fallback
+        
+        if from_rank == 6 and to_rank == 7:  # White promotion
+            side_offset = 0
+        elif from_rank == 1 and to_rank == 0:  # Black promotion  
+            side_offset = 96
+        else:
+            return 4096  # Invalid promotion ranks fallback
+        
+        index = 4096 + side_offset + (from_file * 12) + (direction * 4) + piece_type
+        return index if index < 5312 else 4096
+    else:
+        # Regular moves: from_square * 64 + to_square
+        return move.from_square * 64 + move.to_square 

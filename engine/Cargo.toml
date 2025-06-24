@@ -28,6 +28,7 @@ env_logger = "0.10"  # Logging setup
 parking_lot = "0.12"  # Better RwLock implementation
 ordered-float = "3.7"  # Ordered floating point comparisons
 chrono = { version = "0.4", features = ["serde"] }      # Date and time handling
+flate2 = "1.0"   # For decompressing unified storage files
 
 # Web server dependencies
 axum = { version = "0.7", features = ["ws"] }

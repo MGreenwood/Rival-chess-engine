@@ -174,7 +174,7 @@ impl GameStorage {
         let model_stats = match metadata.mode {
             GameMode::SinglePlayer => &mut stats.single_player,
             GameMode::Community => &mut stats.community,
-            GameMode::UCI => &mut stats.single_player, // UCI matches count as single player for stats
+            GameMode::UCI => return Ok(()), // UCI matches don't count in user stats - they're engine vs engine
         };
         
         // Update overall stats
@@ -301,12 +301,16 @@ impl GameStorage {
             }
             Some(GameMode::UCI) => {
                 games.extend(read_games_from_dir(&self.base_path.join("uci_matches"))?);
+                // Also read UCI games from unified storage
+                games.extend(self.read_uci_games_from_unified_storage()?);
             }
             None => {
                 // List games from all directories
                 games.extend(read_games_from_dir(&self.base_path.join("single_player"))?);
                 games.extend(read_games_from_dir(&self.base_path.join("community"))?);
                 games.extend(read_games_from_dir(&self.base_path.join("uci_matches"))?);
+                // Also include UCI games from unified storage
+                games.extend(self.read_uci_games_from_unified_storage()?);
             }
         }
 
@@ -325,5 +329,161 @@ impl GameStorage {
 
     pub fn generate_game_id() -> String {
         Uuid::new_v4().to_string()
+    }
+
+    /// Read UCI tournament games from unified storage batches
+    fn read_uci_games_from_unified_storage(&self) -> std::io::Result<Vec<GameMetadata>> {
+        
+        let mut games = Vec::new();
+        let unified_dir = self.base_path.join("unified");
+        
+        if !unified_dir.exists() {
+            return Ok(games);
+        }
+
+        // Collect batch files first to show progress
+        let batch_files: Vec<_> = fs::read_dir(&unified_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.path().file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |name| name.starts_with("batch_") && name.ends_with(".json.gz"))
+            })
+            .collect();
+
+        let total_batches = batch_files.len();
+        if total_batches > 0 {
+            println!("📦 Reading {} unified batch files for stats cache...", total_batches);
+        }
+
+        // Read all batch files with progress
+        for (i, entry) in batch_files.into_iter().enumerate() {
+            let path = entry.path();
+            
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                println!("📄 Processing batch {}/{}: {}", i + 1, total_batches, filename);
+            }
+            
+            match self.read_unified_batch(&path) {
+                Ok(mut batch_games) => {
+                    println!("   ✅ Found {} UCI games", batch_games.len());
+                    games.append(&mut batch_games);
+                }
+                Err(e) => {
+                    eprintln!("   ⚠️ Warning: Failed to read {}: {}", path.display(), e);
+                    // Continue processing other batches
+                }
+            }
+        }
+
+        if !games.is_empty() {
+            println!("✅ Loaded {} UCI tournament games from unified storage", games.len());
+        }
+        
+        Ok(games)
+    }
+
+    /// Read and parse a single unified storage batch file
+    fn read_unified_batch(&self, path: &Path) -> std::io::Result<Vec<GameMetadata>> {
+        use flate2::read::GzDecoder;
+        use std::io::BufReader;
+        
+        let file = fs::File::open(path)?;
+        let buf_reader = BufReader::new(file);
+        let mut decoder = GzDecoder::new(buf_reader);
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut contents)?;
+
+        // Parse the batch JSON
+        let batch: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, 
+                format!("Invalid JSON in batch {}: {}", path.display(), e)))?;
+
+        let mut games = Vec::new();
+
+        // Extract games from the batch
+        if let Some(batch_games) = batch.get("games").and_then(|g| g.as_array()) {
+            for game_value in batch_games {
+                if let Ok(metadata) = self.parse_unified_game_to_metadata(game_value) {
+                    // Only include UCI tournament games
+                    if metadata.mode == GameMode::UCI {
+                        games.push(metadata);
+                    }
+                }
+            }
+        }
+
+        Ok(games)
+    }
+
+    /// Convert unified game format to GameMetadata
+    fn parse_unified_game_to_metadata(&self, game_value: &serde_json::Value) -> Result<GameMetadata, Box<dyn std::error::Error>> {
+        let game_id = game_value.get("game_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing game_id")?
+            .to_string();
+
+        let source = game_value.get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        // Only process UCI tournament games
+        if source != "uci_tournament" {
+            return Err("Not a UCI tournament game".into());
+        }
+
+        let result = game_value.get("result")
+            .and_then(|v| v.as_str())
+            .unwrap_or("draw");
+
+        let metadata_obj = game_value.get("metadata").ok_or("Missing metadata")?;
+        
+        let opponent = metadata_obj.get("opponent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
+
+        let rival_ai_white = metadata_obj.get("rival_ai_white")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let total_moves = metadata_obj.get("total_moves")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        let timestamp_str = game_value.get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Parse timestamp or use current time as fallback
+        let timestamp = if !timestamp_str.is_empty() {
+            DateTime::parse_from_rfc3339(timestamp_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now())
+        } else {
+            Utc::now()
+        };
+
+        // Convert unified result format to GameStatus
+        let status = match result {
+            "white_wins" => GameStatus::WhiteWins,
+            "black_wins" => GameStatus::BlackWins,
+            _ => GameStatus::DrawStalemate,
+        };
+
+        // Determine player color and name
+        let player_color = if rival_ai_white { "white" } else { "black" };
+        let player_name = Some(format!("RivalAI vs {}", opponent));
+
+        Ok(GameMetadata {
+            game_id,
+            mode: GameMode::UCI,
+            created_at: timestamp,
+            last_move_at: timestamp,
+            status,
+            total_moves,
+            player_color: player_color.to_string(),
+            player_name,
+            engine_version: "1.0.0".to_string(),
+        })
     }
 } 

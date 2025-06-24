@@ -115,7 +115,7 @@ class TrainingConfig:
     
     # Loss function configuration - Optimized for tactical learning
     use_improved_loss: bool = True  # Use improved loss function
-    use_pag_tactical_loss: bool = True  # Use ultra-dense PAG tactical loss for preventing blunders
+    use_pag_tactical_loss: bool = False  # Temporarily disabled: Use ultra-dense PAG tactical loss for preventing blunders
     policy_weight: float = 1.0
     value_weight: float = 1.0  # Restored to 1.0 from 0.5 - position evaluation is critical
     entropy_weight: float = 0.01

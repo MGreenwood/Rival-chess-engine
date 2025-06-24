@@ -584,7 +584,22 @@ const useStore = create<StoreState>((set, get) => {
             }
           }
 
-          console.log('⚡ INSTANT restore from localStorage:', gameId);
+          // 🔥 NEW: Only restore games where moves have actually been made
+          const startingPosition = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+          const hasMoves = moveHistory && moveHistory.length > 0;
+          const hasPositionChanged = board && board !== startingPosition;
+          
+          if (!hasMoves && !hasPositionChanged) {
+            console.log('🚫 Saved game has no moves made yet, not restoring:', {
+              gameId,
+              moveCount: moveHistory?.length || 0,
+              isStartingPosition: board === startingPosition
+            });
+            localStorage.removeItem(`chess_game_${mode}`);
+            return false;
+          }
+
+          console.log('⚡ INSTANT restore from localStorage:', gameId, `(${moveHistory?.length || 0} moves)`);
           
           // 🔥 NEW: Restore immediately from localStorage - no server API call!
           const gameState: GameState = {
@@ -704,44 +719,54 @@ const useStore = create<StoreState>((set, get) => {
               return;
             }
             
-            // If we get 0 total games, try refreshing stats once
+            // If we get 0 total games, check if stats are still loading before calling expensive refresh
             if (stats.total_games === 0) {
-              try {
-                const refreshResponse = await axios.post(`${API_BASE_URL}/stats/refresh`);
-                if (refreshResponse.data[statsKey] && refreshResponse.data[statsKey].total_games > 0) {
-                  const refreshedStats = refreshResponse.data[statsKey];
-                  
-                  // Cache the refreshed stats
-                  const state = get();
-                  set({
-                    modelStats: refreshedStats,
-                    statsCache: {
-                      ...state.statsCache,
-                      [mode]: { stats: refreshedStats, timestamp: Date.now(), recentGames: state.recentGames }
-                    }
-                  });
-                  
-                  // Also refresh recent games when stats are refreshed
-                  try {
-                    const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
-                    const allGames = Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [];
+              // Check if backend indicates stats cache is still loading
+              const isStatsLoading = statsResponse.data.stats_cache_loading;
+              
+              if (!isStatsLoading) {
+                // Only call refresh if stats cache is fully loaded but still shows 0 games
+                try {
+                  console.log('📊 Stats show 0 games but cache is loaded - calling refresh');
+                  const refreshResponse = await axios.post(`${API_BASE_URL}/stats/refresh`);
+                  if (refreshResponse.data[statsKey] && refreshResponse.data[statsKey].total_games > 0) {
+                    const refreshedStats = refreshResponse.data[statsKey];
                     
-                    // Update cache with new games
-                    const finalState = get();
-                    set({ 
-                      recentGames: allGames,
+                    // Cache the refreshed stats
+                    const state = get();
+                    set({
+                      modelStats: refreshedStats,
                       statsCache: {
-                        ...finalState.statsCache,
-                        [mode]: { stats: refreshedStats, timestamp: Date.now(), recentGames: allGames }
+                        ...state.statsCache,
+                        [mode]: { stats: refreshedStats, timestamp: Date.now(), recentGames: state.recentGames }
                       }
                     });
-                  } catch (recentGamesError) {
-                    console.error('❌ Failed to refresh recent games:', recentGamesError);
+                    
+                    // Also refresh recent games when stats are refreshed
+                    try {
+                      const recentGamesResponse = await axios.get(`${API_BASE_URL}/recent-games`);
+                      const allGames = Array.isArray(recentGamesResponse.data) ? recentGamesResponse.data : [];
+                      
+                      // Update cache with new games
+                      const finalState = get();
+                      set({ 
+                        recentGames: allGames,
+                        statsCache: {
+                          ...finalState.statsCache,
+                          [mode]: { stats: refreshedStats, timestamp: Date.now(), recentGames: allGames }
+                        }
+                      });
+                    } catch (recentGamesError) {
+                      console.error('❌ Failed to refresh recent games:', recentGamesError);
+                    }
+                    return;
                   }
-                  return;
+                } catch (refreshError) {
+                  console.warn('Stats refresh failed:', refreshError);
                 }
-              } catch (refreshError) {
-                console.warn('Stats refresh failed:', refreshError);
+              } else {
+                // Stats cache is still loading - don't call expensive refresh
+                console.log('⏳ Stats cache still loading, skipping refresh call');
               }
             }
             

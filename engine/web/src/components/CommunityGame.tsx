@@ -654,6 +654,19 @@ export const CommunityGame: React.FC = () => {
   // Determine user's vote - prioritize local state for persistence during voting
   const userVote = currentUserVote || gameState?.your_vote;
 
+  // Determine board orientation based on community color
+  const getBoardOrientation = (): "white" | "black" => {
+    // Extract from experiment name which includes the community's color
+    if (gameState?.experiment_name?.includes("plays as Black")) {
+      return "black";
+    }
+    
+    // Default to white orientation
+    return "white";
+  };
+
+  const boardOrientation = getBoardOrientation();
+
   // Get possible moves for highlighting
   const customSquareStyles: { [square: string]: { backgroundColor: string } } = {};
   
@@ -763,7 +776,7 @@ export const CommunityGame: React.FC = () => {
           onPieceDrop={handlePieceDrop}
           boardWidth={boardSize}
           customSquareStyles={customSquareStyles}
-          boardOrientation="white"
+          boardOrientation={boardOrientation}
           arePiecesDraggable={gameState?.can_vote && !gameState?.engine_thinking}
         />
         

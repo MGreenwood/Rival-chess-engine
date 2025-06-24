@@ -35,6 +35,19 @@
   .scrollbar-hide::-webkit-scrollbar {
     display: none;  /* Safari and Chrome */
   }
+  
+  /* Prevent file drag icon on chess pieces */
+  .no-drag {
+    -webkit-user-drag: none;
+    -khtml-user-drag: none;
+    -moz-user-drag: none;
+    -o-user-drag: none;
+    user-drag: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+  }
 }
 
 :root {
@@ -105,4 +118,36 @@ button:focus-visible {
   a:hover {
     color: #747bff;
   }
+}
+
+/* Global chess piece drag prevention */
+[data-piece],
+.piece,
+[data-testid*="piece"],
+[class*="piece"],
+.react-chessboard [data-piece],
+.react-chessboard .piece {
+  -webkit-user-drag: none !important;
+  -khtml-user-drag: none !important;
+  -moz-user-drag: none !important;
+  -o-user-drag: none !important;
+  user-drag: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+}
+
+/* Also apply to any images within chess pieces */
+[data-piece] img,
+.piece img,
+[data-testid*="piece"] img,
+[class*="piece"] img,
+.react-chessboard img {
+  -webkit-user-drag: none !important;
+  -khtml-user-drag: none !important;
+  -moz-user-drag: none !important;
+  -o-user-drag: none !important;
+  user-drag: none !important;
+  /* Removed pointer-events: none to allow piece interaction */
 }

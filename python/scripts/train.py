@@ -33,6 +33,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Try to import PAG engine for enhanced feature extraction
+try:
+    import rival_ai_engine as engine
+    PAG_ENGINE_AVAILABLE = True
+    logger.info("✅ PAG engine module available for enhanced training")
+except ImportError as e:
+    PAG_ENGINE_AVAILABLE = False
+    logger.warning(f"⚠️ PAG engine not available: {e}")
+    logger.info("🔄 Will use Python-only PAG fallback mode")
+
 def create_experiment_dir(experiment_name: str) -> str:
     """Create and return the path to the experiment directory.
     
@@ -274,8 +284,20 @@ def main():
         
         # Draw prevention
         draw_penalty_scale=1.5,
-        early_draw_penalty=2.0
+        early_draw_penalty=2.0,
+        
+        # PAG (Positional Adjacency Graph) enhanced feature extraction
+        use_dense_pag=PAG_ENGINE_AVAILABLE,  # Enable Rust PAG engine if available
+        pag_fallback_to_python=True,         # Fallback to Python PAG if Rust fails
     )
+    
+    # Log PAG configuration
+    if PAG_ENGINE_AVAILABLE:
+        logger.info("🚀 Enhanced training with Rust PAG engine enabled")
+        logger.info("   📊 Ultra-dense positional features: ACTIVE")
+        logger.info("   🔧 Fallback to Python PAG: ENABLED")
+    else:
+        logger.info("📈 Standard training with Python PAG fallback")
     
     # Create trainer
     trainer = Trainer(

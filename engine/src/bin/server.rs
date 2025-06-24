@@ -47,7 +47,7 @@ struct Args {
     games_dir: String,
 
     /// Number of games needed before training starts
-    #[arg(long, default_value = "5000")]
+    #[arg(long, default_value = "1000")]
     training_games_threshold: usize,
     
     /// Enable self-play background generation
@@ -67,7 +67,7 @@ struct Args {
     max_self_play_games: usize,
     
     /// Initial number of self-play games on startup
-    #[arg(long, default_value = "20")]
+    #[arg(long, default_value = "30")]
     initial_self_play_games: usize,
     
     /// Target GPU utilization for self-play scaling (0.0-1.0)
@@ -468,6 +468,12 @@ impl CommunityGame {
     }
 
     fn save_game_state(&self, game_storage: &GameStorage) {
+        // Only save games that have actually progressed (have moves)
+        // This prevents "bad saves" at the starting position
+        if self.move_history.is_empty() {
+            return; // Don't save games with no moves
+        }
+
         let game_state = StorageGameState {
             metadata: GameMetadata {
                 game_id: self.game_id.clone(),  // Use persistent game ID
@@ -1114,10 +1120,10 @@ class UltraDenseModelWrapper:
             checkpoint = torch.load('{}', map_location='cpu')
             print("✅ Checkpoint loaded successfully")
             
-            # Use existing ChessGNN interface
+            # Use existing ChessGNN interface with matching architecture
             config = {{
                 'hidden_dim': 256,
-                'num_layers': 4,
+                'num_layers': 10,  # Match training architecture
                 'num_heads': 4, 
                 'dropout': 0.1
             }}
@@ -1160,7 +1166,7 @@ class UltraDenseModelWrapper:
                 # Create fresh model
                 config = {{
                     'hidden_dim': 256,
-                    'num_layers': 4,
+                    'num_layers': 10,  # Match training architecture
                     'num_heads': 4, 
                     'dropout': 0.1
                 }}
@@ -1179,26 +1185,46 @@ class UltraDenseModelWrapper:
     
     def predict_with_board(self, board_fen):
         '''
-        Perform prediction with current model
+        Perform prediction with current model using ultra-dense PAG features
         '''
         if self.use_fallback:
             # Simple fallback prediction
             return ([1.0/5312] * 5312, 0.0)
         
         try:
-            # For now, use uniform policy since we need proper board conversion
-            # TODO: Implement proper board -> model input conversion
-            # print(f"🎯 Predicting for position: {{board_fen[:20]}}...")  # Removed verbose logging
+            import chess
+            from rival_ai.utils.board_conversion import board_to_hetero_data
+            import torch
             
-            # Basic prediction (uniform policy for now)
-            policy = [1.0/5312] * 5312  
-            value = 0.0
+            # Convert board to ultra-dense PAG features
+            board = chess.Board(board_fen)
+            data = board_to_hetero_data(board)
+            data = data.to(self.device)
             
-            return policy, value
+            # Run inference with trained model
+            with torch.no_grad():
+                self.model.eval()
+                policy_logits, value = self.model(data)
+                
+                # Convert to probabilities
+                policy = torch.softmax(policy_logits.squeeze(0), dim=0)
+                policy = policy.cpu().numpy().tolist()
+                value = float(value.squeeze().cpu().numpy())
+                
+                # Ensure policy is correct length
+                if len(policy) != 5312:
+                    print(f"⚠️ Policy size mismatch: got {{len(policy)}}, expected 5312")
+                    # Pad or truncate to correct size
+                    if len(policy) < 5312:
+                        policy.extend([0.0] * (5312 - len(policy)))
+                    else:
+                        policy = policy[:5312]
+                
+                return policy, value
             
         except Exception as e:
-            print(f"⚠️ Prediction failed: {{e}}")
-            # Ultimate fallback
+            print(f"⚠️ Inference failed: {{e}}")
+            # Fallback to uniform policy
             return ([1.0/5312] * 5312, 0.0)
     
     def eval(self):
@@ -1457,6 +1483,13 @@ async fn vote_move(
         // Remove empty vote entries
         game.votes.retain(|_, voters| !voters.is_empty());
 
+        // 🎯 FIX: If all votes are removed, stop the timer
+        if game.votes.is_empty() && game.votes_started {
+            eprintln!("🛑 All votes removed - stopping timer");
+            game.voting_ends_at = None;
+            game.votes_started = false;
+        }
+
         let response = VoteResponse {
             success: true,
             error_message: None,
@@ -1563,7 +1596,9 @@ async fn get_recent_games(data: web::Data<AppState>) -> impl Responder {
     // Serve recent completed games from memory queue (much faster than disk I/O!)
     let recent_games = {
         let queue = recover_mutex(data.recent_completed_games.lock());
-        queue.iter().cloned().collect::<Vec<_>>()
+        queue.iter().cloned()
+            .filter(|g| g.mode != GameMode::UCI) // Exclude UCI tournament games from recent games
+            .collect::<Vec<_>>()
     };
     
     let mut response_games = Vec::new();
@@ -1573,7 +1608,7 @@ async fn get_recent_games(data: web::Data<AppState>) -> impl Responder {
         let mode_str = match metadata.mode {
             GameMode::SinglePlayer => "single",
             GameMode::Community => "community", 
-            GameMode::UCI => "single", // UCI games show as single-player in UI
+            GameMode::UCI => unreachable!(), // Already filtered out above
         };
         
         let status_str = match metadata.status {
@@ -1637,6 +1672,7 @@ struct ServerStats {
     self_play_games: usize,
     unprocessed_games_count: usize,
     total_games_count: usize,
+    stats_cache_loading: bool,  // Indicates if stats are still being loaded in background
 }
 
 // Initialize stats cache by reading all games once on startup
@@ -1687,10 +1723,15 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
     
     // Add unarchived games to the stats
     for metadata in &current_games {
+        // Skip UCI tournament games - they don't count in user stats (engine vs engine performance)
+        if metadata.mode == GameMode::UCI {
+            continue;
+        }
+        
         let stats = match metadata.mode {
             GameMode::SinglePlayer => &mut single_player_stats,
             GameMode::Community => &mut community_stats,
-            GameMode::UCI => &mut single_player_stats, // UCI tournament games count as single-player for stats
+            GameMode::UCI => unreachable!(), // Already handled above
         };
         
         if matches!(metadata.status, 
@@ -1788,11 +1829,8 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
     single_player_stats.gpu_utilization = gpu_util;
     community_stats.gpu_utilization = gpu_util;
     
-    // Get training-ready games count for training progress
-    let training_ready_games = match count_training_ready_games(&args.games_dir).await {
-        Ok(count) => count,
-        Err(_) => 0, // Fall back to 0 if counting fails
-    };
+    // Skip expensive Python call during cache initialization - we'll update this later
+    let training_ready_games = 0; // Set to 0 during init to avoid hanging
     
     single_player_stats.games_until_training = if training_ready_games >= args.training_games_threshold {
         0
@@ -1808,6 +1846,7 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
         self_play_games: data.self_play_games.load(Ordering::SeqCst),
         unprocessed_games_count: training_ready_games,
         total_games_count: current_games.len(), // This is now just unarchived games
+        stats_cache_loading: false,  // Cache is now loaded
     };
     
     {
@@ -1819,10 +1858,13 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
     {
         let mut recent_queue = recover_mutex(data.recent_completed_games.lock());
         let mut completed_games: Vec<_> = current_games.into_iter()
-            .filter(|g| matches!(g.status, 
-                GameStatus::WhiteWins | GameStatus::BlackWins | 
-                GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
-                GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves))
+            .filter(|g| {
+                // Only include user games (single-player and community), not UCI tournament games
+                g.mode != GameMode::UCI && matches!(g.status, 
+                    GameStatus::WhiteWins | GameStatus::BlackWins | 
+                    GameStatus::DrawStalemate | GameStatus::DrawInsufficientMaterial |
+                    GameStatus::DrawRepetition | GameStatus::DrawFiftyMoves)
+            })
             .collect();
         
         // Sort by last_move_at descending (newest first)
@@ -1847,12 +1889,17 @@ async fn initialize_stats_cache(data: &web::Data<AppState>, args: &Args) -> Resu
 
 // Function to update cache when a game completes (NO FILE I/O!)
 fn update_stats_cache_for_completed_game(data: &web::Data<AppState>, metadata: &GameMetadata) {
+    // Skip UCI tournament games - they don't count in user stats (engine vs engine performance)
+    if metadata.mode == GameMode::UCI {
+        return;
+    }
+    
     let mut cache = recover_mutex(data.cached_stats.lock());
     
     let stats = match metadata.mode {
         GameMode::SinglePlayer => &mut cache.single_player_model,
         GameMode::Community => &mut cache.community_model,
-        GameMode::UCI => &mut cache.single_player_model, // UCI games count as single-player
+        GameMode::UCI => unreachable!(), // Already handled above
     };
     
     // Only update for completed games
@@ -1896,8 +1943,9 @@ fn update_stats_cache_for_completed_game(data: &web::Data<AppState>, metadata: &
         
         println!("📊 Cache updated: {} now has {} total games (W:{} L:{} D:{}, {:.1}% win rate)", 
             match metadata.mode {
-                GameMode::SinglePlayer | GameMode::UCI => "Single-player",
+                GameMode::SinglePlayer => "Single-player",
                 GameMode::Community => "Community",
+                GameMode::UCI => unreachable!(),
             },
             stats.total_games, stats.wins, stats.losses, stats.draws, stats.win_rate);
     }
@@ -1907,11 +1955,12 @@ async fn get_model_stats(data: web::Data<AppState>) -> impl Responder {
     // Just return the cached stats - no file I/O!
     let mut cache = recover_mutex(data.cached_stats.lock());
     
-    // Update dynamic values that can change frequently
+    // Update dynamic values that can change frequently (but preserve loading state)
     cache.active_players = data.active_players.load(Ordering::SeqCst);
     cache.self_play_games = data.self_play_games.load(Ordering::SeqCst);
     cache.single_player_model.is_training = data.is_training.load(Ordering::SeqCst);
     cache.community_model.is_training = data.is_training.load(Ordering::SeqCst);
+    // Note: stats_cache_loading is preserved and only changed by the background task
     
     // Update GPU utilization if needed (this is the only "expensive" operation left)
     Python::with_gil(|py| {
@@ -1945,25 +1994,10 @@ struct LeaderboardEntry {
 }
 
 async fn refresh_stats(data: web::Data<AppState>) -> impl Responder {
-    println!("Stats refresh requested");
+    // Just return cached stats - DON'T re-read files (that happens in background)
+    println!("📊 Stats refresh requested - returning cached data");
     
-    // Force reload stats by calling the same logic as get_model_stats
-    match data.game_storage.list_games(None) {
-        Ok(games) => {
-            let total_games = games.len();
-            let single_player_games = games.iter().filter(|g| matches!(g.mode, GameMode::SinglePlayer | GameMode::UCI)).count();
-            let community_games = games.iter().filter(|g| matches!(g.mode, GameMode::Community)).count();
-            let uci_games = games.iter().filter(|g| matches!(g.mode, GameMode::UCI)).count();
-            
-            println!("Stats refresh: Found {} total games ({} single-player, {} community, {} UCI)", 
-                total_games, single_player_games - uci_games, community_games, uci_games);
-        }
-        Err(e) => {
-            println!("Error during stats refresh: {}", e);
-        }
-    }
-    
-    // Always call get_model_stats to return the refreshed stats
+    // Simply return the current cached stats without expensive file I/O
     get_model_stats(data).await
 }
 
@@ -2203,6 +2237,7 @@ class UnifiedFallbackModel:
                 self_play_games: 0,
                 unprocessed_games_count: 0,
                 total_games_count: 0,
+                stats_cache_loading: true,  // Initially loading
             })),
             // Initialize empty queue for recent completed games (max 10)
             recent_completed_games: Arc::new(Mutex::new(VecDeque::with_capacity(10))),
@@ -2313,17 +2348,21 @@ class UnifiedFallbackModel:
         app_state
     });
 
-    // Initialize stats cache (read files once, then just use memory) - OUTSIDE the Python closure
-    println!("🚀 Initializing high-performance stats cache...");
-    match initialize_stats_cache(&server, &args).await {
-        Ok(()) => {
-            println!("✅ Stats cache initialized successfully");
+    // Initialize stats cache in background - DON'T BLOCK SERVER STARTUP
+    println!("🚀 Starting background stats cache initialization...");
+    let server_for_stats = server.clone();
+    let args_for_stats = args.clone();
+    actix_web::rt::spawn(async move {
+        match initialize_stats_cache(&server_for_stats, &args_for_stats).await {
+            Ok(()) => {
+                println!("✅ Background stats cache initialized successfully");
+            }
+            Err(e) => {
+                println!("⚠️ Warning: Background stats cache initialization failed: {}", e);
+                println!("📊 Will serve basic stats until cache is ready");
+            }
         }
-        Err(e) => {
-            println!("⚠️ Warning: Stats cache initialization failed: {}", e);
-            println!("📊 Will serve empty stats until games are completed");
-        }
-    }
+    });
 
     let http_server = HttpServer::new(move || {
         App::new()
@@ -2676,6 +2715,7 @@ async fn generate_self_play_games(
     num_games: usize,
     save_dir: &str,
     _fallback_model_path: &str,  // Keep for compatibility, but use current model path
+    training_threshold: usize,   // Add training threshold parameter
 ) -> Result<(), String> {
     use tokio::process::Command;
     
@@ -2707,6 +2747,8 @@ async fn generate_self_play_games(
         .arg(save_dir)
         .arg("--num-games")
         .arg(num_games.to_string())
+        .arg("--training-threshold")
+        .arg(training_threshold.to_string())
         .arg("--low-priority")  // Add flag for lower GPU priority
         .kill_on_drop(true)  // Kill if server shuts down
         .output()
@@ -2773,9 +2815,9 @@ async fn background_self_play_task(
     args: Args,
 ) {
     let target_gpu_util = args.target_gpu_utilization;  // Use configurable target
-    let min_self_play = 20;
+    let min_self_play = 30;  // Increased from 20 for faster training data collection
     let max_self_play = args.max_self_play_games;     // Use configurable max
-    let generation_interval = 120;
+    let generation_interval = 60;  // Reduced from 90s to 60s for more aggressive generation
     
     println!("🎮 Self-play scaling initialized:");
     println!("   📊 Target GPU utilization: {:.1}%", target_gpu_util * 100.0);
@@ -2844,43 +2886,35 @@ async fn background_self_play_task(
             rapid_scale_mode = true;
             
             if gpu_util < 0.5 {
-                // Very low GPU usage - rapid scale up
-                let scale_factor = if current_self_play < 50 { 10 } else { 5 };
+                // Very low GPU usage - rapid scale up (more aggressive)
+                let scale_factor = if current_self_play < 100 { 15 } else { 10 };
                 new_self_play = (current_self_play + scale_factor).min(max_self_play);
             } else if gpu_util < target_gpu_util {
-                // Moderate GPU usage - steady scale up
-                let scale_factor = if current_self_play < 20 { 5 } else { 2 };
+                // Moderate GPU usage - steady scale up (more aggressive)
+                let scale_factor = if current_self_play < 50 { 10 } else { 5 };
                 new_self_play = (current_self_play + scale_factor).min(max_self_play);
             } else if gpu_util > target_gpu_util + 0.1 {
                 // GPU getting saturated - scale back
-                new_self_play = current_self_play.saturating_sub(2).max(min_self_play);
+                new_self_play = current_self_play.saturating_sub(3).max(min_self_play);
             }
         } else if active_players <= 2 {
-            // Low traffic - moderate scaling
-            rapid_scale_mode = false;
+            // Low traffic - aggressive scaling for training
+            rapid_scale_mode = true;
             
-            if gpu_util < target_gpu_util - 0.2 && current_self_play < 50 {
-                // Room for more games
-                new_self_play = (current_self_play + 3).min(50);  // Cap at 50 with some players
-            } else if gpu_util < target_gpu_util - 0.1 {
-                new_self_play = (current_self_play + 1).min(20);  // Conservative scaling
-            } else if gpu_util > target_gpu_util + 0.1 {
-                new_self_play = current_self_play.saturating_sub(1).max(min_self_play);
-            }
+            // Since GPU util is always 0%, ignore GPU constraints and focus on training
+            new_self_play = (current_self_play + 8).min(150);  // Increased from +5 to +8, cap from 100 to 150
+        } else if active_players <= 5 {
+            // Moderate traffic - training-focused with 50 games
+            rapid_scale_mode = false;
+            new_self_play = (current_self_play + 2).min(50);  // Up to 50 games for 3-5 players
+        } else if active_players <= 10 {
+            // Higher traffic - balanced training generation 
+            rapid_scale_mode = false;
+            new_self_play = current_self_play.max(25).min(30);  // 25-30 games for 6-10 players
         } else {
-            // High traffic - scale down to preserve resources for players
+            // Very high traffic - use minimum games for consistent training data
             rapid_scale_mode = false;
-            
-            if active_players > 10 {
-                // Very high traffic - minimal self-play
-                new_self_play = min_self_play;
-            } else if active_players > 5 {
-                // High traffic - limited self-play  
-                new_self_play = current_self_play.saturating_sub(2).max(min_self_play).min(5);
-            } else {
-                // Moderate traffic
-                new_self_play = current_self_play.saturating_sub(1).max(min_self_play).min(10);
-            }
+            new_self_play = min_self_play;  // Use minimum games (20) even with high traffic
         }
         
         // Apply the scaling decision
@@ -2897,7 +2931,8 @@ async fn background_self_play_task(
                     data.clone(),
                     new_self_play,
                     &args.games_dir,
-                    &args.model_path
+                    &args.model_path,
+                    args.training_games_threshold
                 ).await {
                     Ok(()) => {
                         last_generation = std::time::Instant::now();
@@ -2919,7 +2954,10 @@ async fn background_self_play_task(
         if last_generation.elapsed().as_secs() % 300 == 0 && last_generation.elapsed().as_secs() > 0 {
             eprintln!("📊 Self-play status: {} games, GPU: {:.1}%, Players: {}, Mode: {}", 
                 new_self_play, gpu_util * 100.0, active_players, 
-                if community_busy { "Community Priority" } else if rapid_scale_mode { "Rapid Scale" } else { "Normal" });
+                if community_busy { "Community Priority" } 
+                else if rapid_scale_mode { "Training Focus" } 
+                else if active_players <= 5 { "Training Balanced" }
+                else { "User Priority" });
         }
         
         // Yield to prevent blocking other tasks
@@ -2992,7 +3030,9 @@ async fn start_voting_round(
             your_vote: None, // We don't track which specific vote this user made
             can_vote: game.can_vote(),
             waiting_for_first_move: game.waiting_for_first_move(),
-            experiment_name: data.get_experiment_name(),
+            experiment_name: format!("{} - Community plays as {}", 
+                data.get_experiment_name(),
+                if game.player_is_white { "White" } else { "Black" }),
             engine_thinking: game.engine_thinking,
         },
     })
@@ -3054,7 +3094,9 @@ async fn force_resolve_voting(
                     your_vote: None,
                     can_vote: game.can_vote(),
                     waiting_for_first_move: game.waiting_for_first_move(),
-                    experiment_name: data.get_experiment_name(),
+                    experiment_name: format!("{} - Community plays as {}", 
+                        data.get_experiment_name(),
+                        if game.player_is_white { "White" } else { "Black" }),
                     engine_thinking: game.engine_thinking,
                 },
             })

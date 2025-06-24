@@ -85,13 +85,19 @@ class UnifiedServerTrainingRunner:
             for subdir in ['checkpoints', 'logs', 'self_play_data']:
                 (experiment_dir / subdir).mkdir(parents=True, exist_ok=True)
             
-            # Create model with existing ChessGNN interface
+            # Create model with ultra-dense PAG support - deep architecture for complex patterns
             model = ChessGNN(
                 hidden_dim=256,
-                num_layers=4,
+                num_layers=10,  # Deep network to fully leverage ultra-dense PAG features
                 num_heads=4,
-                dropout=0.1
+                dropout=0.1,
+                use_ultra_dense_pag=True,  # Enable ultra-dense PAG features
+                piece_dim=350,  # Ultra-dense piece features from Rust PAG
+                critical_square_dim=95  # Ultra-dense critical square features
             )
+            logger.info("🚀 Created ChessGNN with ULTRA-DENSE PAG support!")
+            logger.info("   This will use 350+ dimensional piece features")
+            logger.info("   And 95+ dimensional critical square features")
             
             # Load existing checkpoint
             try:
@@ -144,8 +150,8 @@ class UnifiedServerTrainingRunner:
                 use_prc_metrics=False
             )
             
-            # Get training data batches
-            max_batches = 10  # Limit to avoid using too much data at once
+            # Get training data batches - FIXED: Use much smaller batches to avoid memory issues
+            max_batches = 2  # Process only 2 batches at a time to prevent 33GB memory usage
             batch_files = self.storage.prepare_training_data(max_batches=max_batches)
             
             if not batch_files:

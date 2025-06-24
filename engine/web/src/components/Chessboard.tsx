@@ -445,6 +445,49 @@ export function ChessGame({
     };
   }, [isDragging, boardPosition, currentGame?.board]);
 
+  // Prevent file drag icon while preserving chess piece movement
+  useEffect(() => {
+    const preventFileDragIcon = () => {
+      // Find all piece elements and style them to prevent file drag icon
+      const pieces = document.querySelectorAll('[data-piece], .piece, [data-testid*="piece"]');
+      pieces.forEach((piece) => {
+        const element = piece as HTMLElement;
+        // Keep draggable=true for react-chessboard functionality
+        // But prevent text selection and file drag styling
+        element.style.setProperty('-moz-user-select', 'none');
+        element.style.setProperty('-webkit-user-select', 'none');
+        element.style.setProperty('-ms-user-select', 'none');
+        element.style.userSelect = 'none';
+        
+        // Style images to prevent file drag icon but keep functionality
+        const images = element.querySelectorAll('img');
+        images.forEach((img) => {
+          // Don't disable draggable - just prevent file drag styling
+          img.style.setProperty('-webkit-user-drag', 'none');
+          img.style.setProperty('user-drag', 'none');
+          img.style.pointerEvents = 'none'; // Let parent handle drag events
+        });
+      });
+    };
+
+    // Apply styling initially and whenever the board position changes  
+    const timer = setTimeout(preventFileDragIcon, 100);
+    
+    // Also add a mutation observer to catch any dynamically added pieces
+    const observer = new MutationObserver(preventFileDragIcon);
+    if (containerRef.current) {
+      observer.observe(containerRef.current, { 
+        childList: true, 
+        subtree: true 
+      });
+    }
+
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [boardPosition]);
+
   return (
     <>
       {/* Manual sync button */}
@@ -472,7 +515,17 @@ export function ChessGame({
         </div>
       )}
       
-    <div ref={containerRef} className="w-full h-full relative">
+    <div 
+      ref={containerRef} 
+      className="w-full h-full relative"
+      style={{
+        // Disable default drag behavior on all child elements
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        MozUserSelect: 'none',
+        msUserSelect: 'none'
+      }}
+    >
 
       
       {/* Loading/initializing message at top but smaller */}
