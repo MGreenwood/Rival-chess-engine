@@ -93,25 +93,43 @@ export function ChessGame({
   // Fix the game initialization to prevent multiple calls
   useEffect(() => {
     const initGame = async () => {
-              // Skip auto-initialization if restoration is in progress
-        if (skipAutoInit) {
+      console.log('🎮 ChessGame initialization starting:', {
+        skipAutoInit,
+        hasCurrentGame: !!currentGame,
+        gameId: currentGame?.metadata?.game_id,
+        gameStatus: currentGame?.status,
+        isPlayerTurn: currentGame?.is_player_turn,
+        isInitializing
+      });
+      
+      // Skip auto-initialization if restoration is in progress
+      if (skipAutoInit) {
+        console.log('⏭️ Skipping auto-init due to restoration in progress');
+        setIsInitializing(false);
+        return;
+      }
+      
+      // Only start a new game if we don't have an active one
+      if (!currentGame?.metadata?.game_id) {
+        console.log('🆕 No active game found, starting new game...');
+        setIsInitializing(true);
+        try {
+          await startNewGame('single');
+          console.log('✅ New game started successfully');
+        } catch (error) {
+          console.error('❌ Failed to initialize game:', error);
+        } finally {
           setIsInitializing(false);
-          return;
         }
-        
-        // Only start a new game if we don't have an active one
-        if (!currentGame?.metadata?.game_id) {
-          setIsInitializing(true);
-          try {
-            await startNewGame('single');
-          } catch (error) {
-            console.error('Failed to initialize game:', error);
-          } finally {
-            setIsInitializing(false);
-          }
-        } else {
-          setIsInitializing(false);
-        }
+      } else {
+        console.log('✅ Active game found, using existing game:', {
+          gameId: currentGame.metadata.game_id,
+          status: currentGame.status,
+          isPlayerTurn: currentGame.is_player_turn,
+          board: currentGame.board?.substring(0, 20) + '...'
+        });
+        setIsInitializing(false);
+      }
     };
     
     // Only run once when the component mounts, or when skipAutoInit changes
@@ -175,17 +193,41 @@ export function ChessGame({
   }, [currentGame?.move_history?.length]); // Only trigger on history length change
 
   const onDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
+    console.log('🎯 onDrop called with:', {
+      sourceSquare,
+      targetSquare,
+      piece,
+      viewOnly,
+      loading,
+      isInitializing,
+      hasGameId: !!currentGame?.metadata?.game_id,
+      gameId: currentGame?.metadata?.game_id,
+      isPlayerTurn: currentGame?.is_player_turn,
+      currentGameStatus: currentGame?.status,
+      currentGame: !!currentGame
+    });
+
     // If in view-only mode, loading, initializing, or no game state, don't allow moves
     if (viewOnly || loading || isInitializing || !currentGame?.metadata?.game_id) {
+      console.log('❌ Move blocked by initial conditions:', {
+        viewOnly,
+        loading,
+        isInitializing,
+        hasGameId: !!currentGame?.metadata?.game_id
+      });
       return false; // Silently reject
     }
 
     // If it's not the player's turn, don't allow moves
     if (currentGame && !(currentGame as GameState).is_player_turn) {
+      console.log('❌ Move blocked - not player turn:', {
+        isPlayerTurn: currentGame.is_player_turn,
+        gameStatus: currentGame.status
+      });
       return false; // Silently reject
     }
 
-    console.log('Attempting move:', {
+    console.log('✅ Move allowed! Attempting move:', {
       from: sourceSquare,
       to: targetSquare,
       piece,
@@ -267,10 +309,19 @@ export function ChessGame({
 
   // Fix the onPieceDrop to NOT make moves for promotions
   const onPieceDrop = useCallback((sourceSquare: Square, targetSquare: Square, piece: Piece) => {
+    console.log('🎯 onPieceDrop called!', {
+      sourceSquare,
+      targetSquare,
+      piece,
+      timestamp: new Date().toISOString()
+    });
+    
     // Clear dragging state when drop occurs
     setIsDragging(false);
     
     const result = onDrop(sourceSquare, targetSquare, piece);
+    
+    console.log('🎯 onDrop result:', result);
     
     if (result) {
       const isPawnMove = piece.toLowerCase().includes('p');
@@ -278,6 +329,7 @@ export function ChessGame({
                            (piece.toLowerCase().includes('b') && targetSquare.endsWith('1'));
       
       if (isPawnMove && isToLastRank) {
+        console.log('🎯 Pawn promotion detected, letting library handle it');
         return result;
       }
       
@@ -320,6 +372,8 @@ export function ChessGame({
             }
           }
         });
+    } else {
+      console.log('❌ onDrop returned false, move was rejected');
     }
     
     return result;
@@ -331,8 +385,6 @@ export function ChessGame({
       setIsDragging(false); // Clear dragging state on click
     }
   }, [viewOnly, isInitializing, loading]);
-
-
 
   // Add right-click handler to cancel dragging
   useEffect(() => {
@@ -448,25 +500,15 @@ export function ChessGame({
   // Prevent file drag icon while preserving chess piece movement
   useEffect(() => {
     const preventFileDragIcon = () => {
-      // Find all piece elements and style them to prevent file drag icon
-      const pieces = document.querySelectorAll('[data-piece], .piece, [data-testid*="piece"]');
-      pieces.forEach((piece) => {
-        const element = piece as HTMLElement;
-        // Keep draggable=true for react-chessboard functionality
-        // But prevent text selection and file drag styling
-        element.style.setProperty('-moz-user-select', 'none');
-        element.style.setProperty('-webkit-user-select', 'none');
-        element.style.setProperty('-ms-user-select', 'none');
-        element.style.userSelect = 'none';
-        
-        // Style images to prevent file drag icon but keep functionality
-        const images = element.querySelectorAll('img');
-        images.forEach((img) => {
-          // Don't disable draggable - just prevent file drag styling
-          img.style.setProperty('-webkit-user-drag', 'none');
-          img.style.setProperty('user-drag', 'none');
-          img.style.pointerEvents = 'none'; // Let parent handle drag events
-        });
+      // Only target images and SVGs inside chess pieces to prevent file drag icon
+      const images = document.querySelectorAll('[data-piece] img, .piece img, [data-testid*="piece"] img');
+      const svgs = document.querySelectorAll('[data-piece] svg, .piece svg, [data-testid*="piece"] svg');
+      
+      [...images, ...svgs].forEach((element) => {
+        const el = element as HTMLElement;
+        el.style.setProperty('-webkit-user-drag', 'none');
+        el.style.setProperty('user-drag', 'none');
+        el.style.pointerEvents = 'none'; // Images/SVGs don't need to handle drag events
       });
     };
 
@@ -487,6 +529,31 @@ export function ChessGame({
       observer.disconnect();
     };
   }, [boardPosition]);
+
+  // Add periodic debug logging to track game state
+  useEffect(() => {
+    if (!viewOnly) {
+      const debugInterval = setInterval(() => {
+        console.log('🔍 ChessGame State Debug:', {
+          timestamp: new Date().toISOString(),
+          isInitializing,
+          loading,
+          viewOnly,
+          hasCurrentGame: !!currentGame,
+          gameId: currentGame?.metadata?.game_id || currentGame?.game_id,
+          gameStatus: currentGame?.status,
+          isPlayerTurn: currentGame?.is_player_turn,
+          boardPosition: boardPosition?.substring(0, 20) + '...',
+          moveHistoryLength: currentGame?.move_history?.length || 0,
+          canMove: !viewOnly && !loading && !isInitializing && 
+                   !!(currentGame?.metadata?.game_id) && 
+                   !!(currentGame?.is_player_turn)
+        });
+      }, 5000); // Log every 5 seconds
+
+      return () => clearInterval(debugInterval);
+    }
+  }, [isInitializing, loading, viewOnly, currentGame, boardPosition]);
 
   return (
     <>
@@ -543,6 +610,7 @@ export function ChessGame({
         onPromotionPieceSelect={onPromotionPieceSelect}
         onSquareClick={onSquareClick}
         boardWidth={boardWidth}
+        arePiecesDraggable={!viewOnly && !loading && !isInitializing && !!currentGame?.metadata?.game_id && !!currentGame?.is_player_turn}
         customBoardStyle={{
           borderRadius: '4px',
           boxShadow: isPlayerInCheck 
@@ -567,4 +635,4 @@ export function ChessGame({
     </div>
     </>
   );
-} 
+}

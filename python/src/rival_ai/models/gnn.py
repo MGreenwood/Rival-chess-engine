@@ -251,9 +251,9 @@ class ChessGNN(nn.Module):
         
         # Input dimensions - support both ultra-dense PAG and basic features
         if use_ultra_dense_pag:
-            # Ultra-dense PAG dimensions from Rust
-            self.piece_dim = piece_dim if piece_dim is not None else 350  # 350+ features from Rust PAG
-            self.critical_square_dim = critical_square_dim if critical_square_dim is not None else 95  # 95+ features
+            # Ultra-dense PAG dimensions from Rust - FIXED: Both pieces and squares use 308 features
+            self.piece_dim = piece_dim if piece_dim is not None else 308  # 308 features from Rust PAG
+            self.critical_square_dim = critical_square_dim if critical_square_dim is not None else 95  # 95 features for critical squares
             logger.info(f"🚀 Initializing ChessGNN with ULTRA-DENSE PAG features:")
             logger.info(f"   Piece features: {self.piece_dim} dimensions")
             logger.info(f"   Critical square features: {self.critical_square_dim} dimensions")
@@ -380,8 +380,40 @@ class ChessGNN(nn.Module):
             raise ValueError(f"Expected 'square' or 'critical_square' node type, but found: {data.node_types}")
         
         # Get node features and apply embeddings
-        piece_x = self.piece_embedding(data['piece'].x)
-        square_x = self.square_embedding(data[square_node_type].x)
+        logger.info(f"🔍 DEBUG: Piece features shape: {data['piece'].x.shape}")
+        logger.info(f"🔍 DEBUG: Square features shape: {data[square_node_type].x.shape}")
+        logger.info(f"🔍 DEBUG: Square node type: {square_node_type}")
+        logger.info(f"🔍 DEBUG: Available node types: {data.node_types}")
+        
+        # ADD DETAILED TENSOR INSPECTION
+        logger.info(f"🔍 DEBUG: Piece embedding expects: {self.piece_embedding.in_features} dimensions")
+        logger.info(f"🔍 DEBUG: Square embedding expects: {self.square_embedding.in_features} dimensions")
+        logger.info(f"🔍 DEBUG: Piece tensor actual shape: {data['piece'].x.shape}")
+        logger.info(f"🔍 DEBUG: Square tensor actual shape: {data[square_node_type].x.shape}")
+        
+        # Check if tensors match expected dimensions
+        if data['piece'].x.shape[1] != self.piece_embedding.in_features:
+            logger.error(f"❌ MISMATCH: Piece features have {data['piece'].x.shape[1]} dims but embedding expects {self.piece_embedding.in_features}")
+        
+        if data[square_node_type].x.shape[1] != self.square_embedding.in_features:
+            logger.error(f"❌ MISMATCH: Square features have {data[square_node_type].x.shape[1]} dims but embedding expects {self.square_embedding.in_features}")
+        
+        # Apply embeddings with error handling
+        try:
+            logger.info(f"🔄 Applying piece embedding: {data['piece'].x.shape} -> Linear({self.piece_embedding.in_features}, {self.piece_embedding.out_features})")
+            piece_x = self.piece_embedding(data['piece'].x)
+            logger.info(f"✅ Piece embedding successful: {piece_x.shape}")
+        except Exception as e:
+            logger.error(f"❌ Piece embedding failed: {e}")
+            raise
+            
+        try:
+            logger.info(f"🔄 Applying square embedding: {data[square_node_type].x.shape} -> Linear({self.square_embedding.in_features}, {self.square_embedding.out_features})")
+            square_x = self.square_embedding(data[square_node_type].x)
+            logger.info(f"✅ Square embedding successful: {square_x.shape}")
+        except Exception as e:
+            logger.error(f"❌ Square embedding failed: {e}")
+            raise
         
         # Store node features in dictionary
         x_dict = {

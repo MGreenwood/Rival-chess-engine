@@ -85,7 +85,7 @@ def extract_dense_pag_features(fen: str) -> Optional[Dict]:
         
     try:
         # Create Rust PAG engine instance
-        engine = rival_ai_engine.Engine()
+        engine = rival_ai_engine.PyPAGEngine()
         
         # Extract ultra-dense PAG features
         pag_data = engine.fen_to_dense_pag(fen)
@@ -105,7 +105,7 @@ def board_to_hetero_data(board: chess.Board, use_dense_pag: bool = True) -> Hete
         
     Returns:
         HeteroData object containing:
-        - piece nodes with ultra-dense features [num_pieces, 350+] or basic features [num_pieces, 12]
+        - piece nodes with ultra-dense features [num_pieces, 308] or basic features [num_pieces, 12]
         - critical_square nodes with dense features [num_critical_squares, 95+] or basic [64, 1]
         - comprehensive edge relationships with 256+ features
         - batch information for global pooling
@@ -123,13 +123,16 @@ def board_to_hetero_data(board: chess.Board, use_dense_pag: bool = True) -> Hete
     
     # Fallback to basic features
     logger.info("Using basic features (12-dim pieces, 1-dim squares)")
-    return _board_to_basic_hetero_data(board)
+    hetero_data = _board_to_basic_hetero_data(board)
+    logger.info(f"🔍 FALLBACK DEBUG: Piece tensor shape: {hetero_data['piece'].x.shape}")
+    logger.info(f"🔍 FALLBACK DEBUG: Square tensor shape: {hetero_data['critical_square'].x.shape}")
+    return hetero_data
 
 def _pag_data_to_hetero_data(pag_data: Dict) -> HeteroData:
     """Convert ultra-dense PAG data to HeteroData format.
     
     Args:
-        pag_data: Dictionary containing PAG nodes and edges
+        pag_data: Dictionary containing PAG nodes and edges from Rust engine
         
     Returns:
         HeteroData with ultra-dense features
@@ -137,88 +140,93 @@ def _pag_data_to_hetero_data(pag_data: Dict) -> HeteroData:
     data = HeteroData()
     
     try:
-        # Extract piece nodes (350+ features each)
-        pieces = pag_data.get('pieces', [])
-        if pieces:
-            piece_features = []
-            for piece in pieces:
-                # Each piece has 350+ features from Rust PAG
-                features = piece.get('features', [])
-                if features:
-                    piece_features.append(features)
+        # Extract node features and types from PAG engine format
+        node_features = pag_data.get('node_features', [])
+        node_types = pag_data.get('node_types', [])
+        node_ids = pag_data.get('node_ids', [])
+        
+        logger.info(f"🔍 PAG DEBUG: Received {len(node_features)} nodes from Rust engine")
+        logger.info(f"🔍 PAG DEBUG: Node types: {node_types}")
+        
+        if len(node_features) > 0 and len(node_types) > 0:
+            # Debug: Show first few nodes and their dimensions
+            for i in range(min(5, len(node_features))):
+                features = node_features[i]
+                node_type = node_types[i]
+                if hasattr(features, '__len__'):
+                    logger.info(f"🔍 PAG DEBUG: Node {i}: type='{node_type}', features={len(features)} dims")
                 else:
-                    # Fallback: create basic features
-                    basic_features = [0.0] * 350
-                    basic_features[piece.get('piece_type', 0)] = 1.0
-                    piece_features.append(basic_features)
+                    logger.info(f"🔍 PAG DEBUG: Node {i}: type='{node_type}', features=scalar")
             
+            # Separate pieces and critical squares
+            piece_features = []
+            square_features = []
+            piece_indices = []
+            square_indices = []
+            
+            for i, (features, node_type) in enumerate(zip(node_features, node_types)):
+                if node_type == 'piece':
+                    piece_features.append(features)
+                    piece_indices.append(i)
+                    logger.debug(f"🔍 PAG DEBUG: Added piece {i} with {len(features)} features")
+                elif node_type == 'critical_square':
+                    square_features.append(features) 
+                    square_indices.append(i)
+                    logger.debug(f"🔍 PAG DEBUG: Added square {i} with {len(features)} features")
+                else:
+                    logger.warning(f"🔍 PAG DEBUG: Unknown node type '{node_type}' for node {i}")
+            
+            logger.info(f"🔍 PAG DEBUG: Separated into {len(piece_features)} pieces and {len(square_features)} squares")
+            
+            # Add piece nodes
             if piece_features:
-                piece_tensor = torch.tensor(piece_features, dtype=torch.float32)
+                # FIXED: Convert to numpy array first to avoid slow tensor creation warning
+                piece_features_array = np.array(piece_features, dtype=np.float32)
+                piece_tensor = torch.from_numpy(piece_features_array)
                 data['piece'].x = piece_tensor
                 data['piece'].batch = torch.zeros(len(piece_features), dtype=torch.long)
+                logger.info(f"🔍 CONVERSION DEBUG: Created piece tensor with shape {piece_tensor.shape}")
                 logger.info(f"✅ Loaded {len(piece_features)} pieces with {piece_tensor.shape[1]} ultra-dense features each")
-        
-        # Extract critical square nodes (95+ features each)
-        critical_squares = pag_data.get('critical_squares', [])
-        if critical_squares:
-            square_features = []
-            for square in critical_squares:
-                features = square.get('features', [])
-                if features:
-                    square_features.append(features)
-                else:
-                    # Fallback: create basic features
-                    square_features.append([0.0] * 95)
+            else:
+                # Fallback to basic features if no pieces found
+                data['piece'].x = torch.zeros((1, 308), dtype=torch.float32)
+                data['piece'].batch = torch.zeros(1, dtype=torch.long)
+                logger.warning("⚠️ No pieces found, using zero tensor")
             
+            # Add critical square nodes
             if square_features:
-                square_tensor = torch.tensor(square_features, dtype=torch.float32)
+                # FIXED: Convert to numpy array first to avoid slow tensor creation warning
+                square_features_array = np.array(square_features, dtype=np.float32)
+                square_tensor = torch.from_numpy(square_features_array)
                 data['critical_square'].x = square_tensor
                 data['critical_square'].batch = torch.zeros(len(square_features), dtype=torch.long)
+                logger.info(f"🔍 CONVERSION DEBUG: Created square tensor with shape {square_tensor.shape}")
                 logger.info(f"✅ Loaded {len(square_features)} critical squares with {square_tensor.shape[1]} dense features each")
+            else:
+                # Fallback if no critical squares
+                data['critical_square'].x = torch.zeros((1, 95), dtype=torch.float32)
+                data['critical_square'].batch = torch.zeros(1, dtype=torch.long)
+                logger.warning("⚠️ No critical squares found, using zero tensor")
         
-        # Extract edges with ultra-dense features (256+ features each)
-        edges = pag_data.get('edges', [])
-        if edges:
-            piece_to_square_edges = []
-            piece_to_piece_edges = []
-            square_to_square_edges = []
-            edge_features = {'piece_to_square': [], 'piece_to_piece': [], 'square_to_square': []}
+        # Extract edges from PAG engine format
+        edge_features = pag_data.get('edge_features', [])
+        edge_indices = pag_data.get('edge_indices', [])
+        edge_types = pag_data.get('edge_types', [])
+        
+        if len(edge_indices) > 0 and len(edge_features) > 0:
+            # Convert edge indices to PyTorch format and add to HeteroData
+            # For now, treat all edges as piece-to-piece connections
+            # TODO: Distinguish edge types based on source/target node types
+            edge_indices_array = np.array(edge_indices, dtype=np.int64)
+            edge_index_tensor = torch.from_numpy(edge_indices_array).t().contiguous()
+            edge_features_array = np.array(edge_features, dtype=np.float32)
+            edge_features_tensor = torch.from_numpy(edge_features_array)
             
-            for edge in edges:
-                source = edge.get('source_id', 0)
-                target = edge.get('target_id', 0)
-                source_type = edge.get('source_type', 'piece')
-                target_type = edge.get('target_type', 'critical_square')
-                features = edge.get('features', [0.0] * 256)
-                
-                if source_type == 'piece' and target_type == 'critical_square':
-                    piece_to_square_edges.append([source, target])
-                    edge_features['piece_to_square'].append(features)
-                elif source_type == 'piece' and target_type == 'piece':
-                    piece_to_piece_edges.append([source, target])
-                    edge_features['piece_to_piece'].append(features)
-                elif source_type == 'critical_square' and target_type == 'critical_square':
-                    square_to_square_edges.append([source, target])
-                    edge_features['square_to_square'].append(features)
-            
-            # Add edge indices and features
-            if piece_to_square_edges:
-                data['piece', 'to', 'critical_square'].edge_index = torch.tensor(piece_to_square_edges, dtype=torch.long).t().contiguous()
-                if edge_features['piece_to_square']:
-                    data['piece', 'to', 'critical_square'].edge_attr = torch.tensor(edge_features['piece_to_square'], dtype=torch.float32)
-                logger.info(f"✅ Added {len(piece_to_square_edges)} piece→square edges with {len(edge_features['piece_to_square'][0]) if edge_features['piece_to_square'] else 0} features each")
-            
-            if piece_to_piece_edges:
-                data['piece', 'to', 'piece'].edge_index = torch.tensor(piece_to_piece_edges, dtype=torch.long).t().contiguous()
-                if edge_features['piece_to_piece']:
-                    data['piece', 'to', 'piece'].edge_attr = torch.tensor(edge_features['piece_to_piece'], dtype=torch.float32)
-                logger.info(f"✅ Added {len(piece_to_piece_edges)} piece→piece edges with ultra-dense features")
-            
-            if square_to_square_edges:
-                data['critical_square', 'to', 'critical_square'].edge_index = torch.tensor(square_to_square_edges, dtype=torch.long).t().contiguous()
-                if edge_features['square_to_square']:
-                    data['critical_square', 'to', 'critical_square'].edge_attr = torch.tensor(edge_features['square_to_square'], dtype=torch.float32)
-                logger.info(f"✅ Added {len(square_to_square_edges)} square→square edges with ultra-dense features")
+            # Add as piece-to-piece edges for now (most common type)
+            data['piece', 'to', 'piece'].edge_index = edge_index_tensor
+            data['piece', 'to', 'piece'].edge_attr = edge_features_tensor
+            logger.info(f"✅ Added {len(edge_indices)} edges with {edge_features_tensor.shape[1]} features each")
+
         
         logger.info("🚀 Successfully created HeteroData with ultra-dense PAG features!")
         return data
@@ -227,7 +235,7 @@ def _pag_data_to_hetero_data(pag_data: Dict) -> HeteroData:
         logger.error(f"Failed to convert PAG data to HeteroData: {e}")
         # Create minimal valid HeteroData as fallback
         fallback_data = HeteroData()
-        fallback_data['piece'].x = torch.zeros((1, 350), dtype=torch.float32)
+        fallback_data['piece'].x = torch.zeros((1, 308), dtype=torch.float32)
         fallback_data['piece'].batch = torch.zeros(1, dtype=torch.long)
         fallback_data['critical_square'].x = torch.zeros((1, 95), dtype=torch.float32)
         fallback_data['critical_square'].batch = torch.zeros(1, dtype=torch.long)
@@ -242,7 +250,7 @@ def _board_to_basic_hetero_data(board: chess.Board) -> HeteroData:
         
     Returns:
         HeteroData with basic features padded to ultra-dense dimensions:
-        - piece features: 350-dim (12 real + 338 padding)
+        - piece features: 308-dim (12 real + 296 padding)
         - critical_square features: 95-dim (1 real + 94 padding)
     """
     # Initialize arrays for node features and edge indices
@@ -260,8 +268,8 @@ def _board_to_basic_hetero_data(board: chess.Board) -> HeteroData:
     for square in chess.SQUARES:
         piece = board.piece_at(square)
         if piece is not None:
-            # Create padded piece features compatible with ultra-dense PAG (350-dim)
-            piece_feature = np.zeros(350, dtype=np.float32)  # FIXED: 350 dims to match model
+            # Create padded piece features compatible with ultra-dense PAG (308-dim)
+            piece_feature = np.zeros(308, dtype=np.float32)  # FIXED: 308 dims to match model
             piece_idx = piece.piece_type - 1 + (6 if piece.color else 0)  # 0-5 for white, 6-11 for black
             piece_feature[piece_idx] = 1.0  # Set the basic feature in first 12 positions
             
@@ -302,7 +310,7 @@ def _board_to_basic_hetero_data(board: chess.Board) -> HeteroData:
                     ])
     
     # Convert lists to numpy arrays before creating tensors - FIXED: Use correct dimensions
-    piece_features = np.array(piece_features, dtype=np.float32) if piece_features else np.zeros((0, 350), dtype=np.float32)  # FIXED: 350 dims
+    piece_features = np.array(piece_features, dtype=np.float32) if piece_features else np.zeros((0, 308), dtype=np.float32)  # FIXED: 308 dims
     square_features = np.array(square_features, dtype=np.float32)  # Already 95-dim from above
     
     # Convert to tensors
@@ -335,7 +343,9 @@ def _board_to_basic_hetero_data(board: chess.Board) -> HeteroData:
     data['critical_square', 'to', 'critical_square'].edge_index = square_to_square_edge_index
     
     logger.info(f"✅ Created basic HeteroData with model-compatible dimensions:")
-    logger.info(f"   Pieces: {len(piece_features)} nodes × 350 features")
+    logger.info(f"   Pieces: {len(piece_features)} nodes × 308 features")
     logger.info(f"   Critical squares: {len(square_features)} nodes × 95 features")
+    logger.debug(f"   Piece tensor shape: {piece_features.shape}")
+    logger.debug(f"   Square tensor shape: {square_features.shape}")
     
     return data 

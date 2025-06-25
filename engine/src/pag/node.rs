@@ -213,7 +213,7 @@ impl Node for DensePiece {
     }
     
     fn to_feature_vector(&self) -> Vec<f32> {
-        let mut features = Vec::with_capacity(350);
+        let mut features = Vec::with_capacity(308);
         
         // Basic piece info (encoded as one-hot + position)
         let mut piece_info = vec![0.0; 8]; // 6 piece types + 2 colors

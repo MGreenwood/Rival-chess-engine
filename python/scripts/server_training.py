@@ -71,13 +71,15 @@ class UnifiedServerTrainingRunner:
             logger.info(f"🎯 Found {training_ready} training-ready games ({total_games} total)")
             logger.info(f"🧠 Using unified batched storage format")
             
-            # Create experiment directory
+            # Create experiment directory (in root experiments/ directory)
             experiment_name = f"unified_training_{int(time.time())}"
-            experiment_dir = Path('../experiments') / experiment_name
+            # Get the root directory (RivalAI) by going up from python/scripts/
+            root_dir = script_dir.parent.parent  # python/scripts/ -> python/ -> RivalAI/
+            experiment_dir = root_dir / 'experiments' / experiment_name
             experiment_dir.mkdir(parents=True, exist_ok=True)
             
             # Create standardized model directory for easy server access
-            models_dir = Path('../models')
+            models_dir = root_dir / 'models'
             models_dir.mkdir(exist_ok=True)
             standardized_model_path = models_dir / 'latest_trained_model.pt'
             
@@ -92,11 +94,11 @@ class UnifiedServerTrainingRunner:
                 num_heads=4,
                 dropout=0.1,
                 use_ultra_dense_pag=True,  # Enable ultra-dense PAG features
-                piece_dim=350,  # Ultra-dense piece features from Rust PAG
+                piece_dim=308,  # Ultra-dense piece features from Rust PAG
                 critical_square_dim=95  # Ultra-dense critical square features
             )
             logger.info("🚀 Created ChessGNN with ULTRA-DENSE PAG support!")
-            logger.info("   This will use 350+ dimensional piece features")
+            logger.info("   This will use 308 dimensional piece features")
             logger.info("   And 95+ dimensional critical square features")
             
             # Load existing checkpoint

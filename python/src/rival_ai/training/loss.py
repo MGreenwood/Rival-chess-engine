@@ -17,13 +17,13 @@ class LossConfig:
     entropy_weight: float = 0.01
     mse_weight: float = 1.0
     kl_weight: float = 0.1
-    pag_weight: float = 0.2
-    graph_weight: float = 0.2
-    king_safety_weight: float = 0.15
-    center_control_weight: float = 0.15
-    material_balance_weight: float = 2.0  # 🎯 CRITICAL: Increased from 0.1 to 2.0 for tactical learning!
-    piece_coordination_weight: float = 0.1
-    attack_pattern_weight: float = 0.1
+    pag_weight: float = 2.0  # 🎯 Increased from 0.2 to 2.0 - MUCH stronger PAG learning!
+    graph_weight: float = 1.0  # 🎯 Increased from 0.2 to 1.0 - stronger graph structure learning!
+    king_safety_weight: float = 1.5  # 🎯 Increased from 0.15 to 1.5 - CRITICAL for safety!
+    center_control_weight: float = 1.0  # 🎯 Increased from 0.15 to 1.0 - important for positional play!
+    material_balance_weight: float = 5.0  # 🎯 CRITICAL: Increased from 2.0 to 5.0 for VERY strong material learning!
+    piece_coordination_weight: float = 1.0  # 🎯 Increased from 0.1 to 1.0 - coordination is key!
+    attack_pattern_weight: float = 1.5  # 🎯 Increased from 0.1 to 1.5 - tactical patterns are crucial!
 
 class PolicyValueLoss(nn.Module):
     """Combined policy and value loss for chess model training.
@@ -631,3 +631,219 @@ class PAGFeatureLoss(nn.Module):
         }
         
         return total_loss, loss_components 
+
+class UltraDensePAGLoss(nn.Module):
+    """
+    Ultra-dense PAG loss that directly uses 308-dimensional piece features 
+    and 95-dimensional critical square features to teach chess principles.
+    """
+    
+    def __init__(self, config: Optional[LossConfig] = None):
+        super().__init__()
+        self.config = config or LossConfig()
+        
+        # Feature dimension mappings for 308-dimensional piece features
+        self.tactical_dims = slice(0, 76)      # Tactical features (76 dims)
+        self.positional_dims = slice(76, 156)  # Positional features (80 dims) 
+        self.strategic_dims = slice(156, 216)  # Strategic features (60 dims)
+        self.meta_dims = slice(216, 252)       # Meta features (36 dims)
+        self.geometric_dims = slice(252, 308)  # Geometric features (56 dims)
+        
+        # Vulnerability features within tactical (dimensions 60-75)
+        self.vulnerability_offset = 60
+        self.vulnerability_size = 16
+        
+        # Activity features within positional (dimensions 52-65)
+        self.activity_offset = 52
+        self.activity_size = 14
+        
+        # King safety features within strategic (dimensions 12-23)
+        self.king_safety_offset = 12
+        self.king_safety_size = 12
+    
+    def forward(
+        self,
+        policy_pred: torch.Tensor,
+        value_pred: torch.Tensor,
+        pag_features: Dict[str, torch.Tensor],
+        policy_target: torch.Tensor,
+        value_target: torch.Tensor,
+        board_states: List,
+        model: Optional[nn.Module] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute ultra-dense PAG loss with heavy emphasis on chess principles.
+        """
+        components = {}
+        
+        # Standard policy and value losses
+        policy_loss = F.cross_entropy(policy_pred, policy_target)
+        value_loss = F.mse_loss(value_pred, value_target)
+        
+        components['policy_loss'] = policy_loss.item()
+        components['value_loss'] = value_loss.item()
+        
+        # Extract PAG features if available
+        if 'piece_features' in pag_features:
+            piece_features = pag_features['piece_features']  # [batch_size, num_pieces, 308]
+            
+            # 1. HANGING PIECE PENALTY (CRITICAL!)
+            hanging_penalty = self._compute_hanging_piece_penalty(piece_features)
+            components['hanging_penalty'] = hanging_penalty.item()
+            
+            # 2. PIECE ACTIVITY BONUS
+            activity_bonus = self._compute_activity_bonus(piece_features)
+            components['activity_bonus'] = activity_bonus.item()
+            
+            # 3. KING SAFETY BONUS/PENALTY
+            king_safety_loss = self._compute_king_safety_loss(piece_features)
+            components['king_safety_loss'] = king_safety_loss.item()
+            
+            # 4. COORDINATION BONUS
+            coordination_bonus = self._compute_coordination_bonus(piece_features)
+            components['coordination_bonus'] = coordination_bonus.item()
+            
+            # 5. TACTICAL PATTERN BONUS
+            tactical_bonus = self._compute_tactical_pattern_bonus(piece_features)
+            components['tactical_bonus'] = tactical_bonus.item()
+        else:
+            hanging_penalty = torch.tensor(0.0, device=policy_pred.device)
+            activity_bonus = torch.tensor(0.0, device=policy_pred.device)
+            king_safety_loss = torch.tensor(0.0, device=policy_pred.device)
+            coordination_bonus = torch.tensor(0.0, device=policy_pred.device)
+            tactical_bonus = torch.tensor(0.0, device=policy_pred.device)
+        
+        # Combine all losses with VERY strong PAG weights
+        total_loss = (
+            self.config.policy_weight * policy_loss +
+            self.config.value_weight * value_loss +
+            self.config.material_balance_weight * hanging_penalty +  # MASSIVE penalty for hanging pieces
+            self.config.piece_coordination_weight * (-coordination_bonus) +  # Bonus for coordination
+            self.config.king_safety_weight * king_safety_loss +  # Strong king safety emphasis
+            self.config.attack_pattern_weight * (-tactical_bonus) +  # Bonus for tactical patterns
+            (-activity_bonus * 0.5)  # Bonus for piece activity
+        )
+        
+        components['total_loss'] = total_loss.item()
+        return total_loss, components
+    
+    def _compute_hanging_piece_penalty(self, piece_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute MASSIVE penalty for hanging pieces using vulnerability features.
+        piece_features: [batch_size, num_pieces, 308]
+        """
+        # Extract vulnerability features (tactical dimensions 60-75)
+        tactical_features = piece_features[:, :, self.tactical_dims]  # [batch_size, num_pieces, 76]
+        vulnerability_start = self.vulnerability_offset
+        vulnerability_end = vulnerability_start + self.vulnerability_size
+        vulnerability_features = tactical_features[:, :, vulnerability_start:vulnerability_end]  # [batch_size, num_pieces, 16]
+        
+        # First feature is hanging indicator
+        hanging_scores = vulnerability_features[:, :, 0]  # [batch_size, num_pieces]
+        
+        # Apply sigmoid to get probability of hanging
+        hanging_probs = torch.sigmoid(hanging_scores)
+        
+        # MASSIVE penalty for hanging pieces (scaled by estimated piece value)
+        # Use feature magnitude as proxy for piece value
+        piece_values = torch.norm(piece_features, dim=2)  # [batch_size, num_pieces]
+        piece_values = torch.sigmoid(piece_values)  # Normalize to [0,1]
+        
+        # Penalty is hanging_probability * piece_value * massive_multiplier
+        hanging_penalties = hanging_probs * piece_values * 20.0  # MASSIVE 20x multiplier!
+        
+        # Sum across pieces and batch
+        total_hanging_penalty = torch.mean(torch.sum(hanging_penalties, dim=1))
+        
+        return total_hanging_penalty
+    
+    def _compute_activity_bonus(self, piece_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute bonus for active pieces using positional activity features.
+        """
+        # Extract positional features
+        positional_features = piece_features[:, :, self.positional_dims]  # [batch_size, num_pieces, 80]
+        
+        # Extract activity metrics (dimensions 52-65 in positional)
+        activity_start = self.activity_offset - 76  # Offset within positional features
+        activity_end = activity_start + self.activity_size
+        activity_features = positional_features[:, :, activity_start:activity_end]  # [batch_size, num_pieces, 14]
+        
+        # Average activity score per piece
+        piece_activity = torch.mean(activity_features, dim=2)  # [batch_size, num_pieces]
+        
+        # Apply sigmoid to normalize
+        piece_activity = torch.sigmoid(piece_activity)
+        
+        # Bonus for high activity
+        activity_bonus = torch.mean(torch.sum(piece_activity, dim=1))
+        
+        return activity_bonus
+    
+    def _compute_king_safety_loss(self, piece_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute king safety loss using strategic features.
+        """
+        # Extract strategic features
+        strategic_features = piece_features[:, :, self.strategic_dims]  # [batch_size, num_pieces, 60]
+        
+        # Extract king safety contribution (dimensions 12-23 in strategic)
+        safety_start = self.king_safety_offset - 156  # Offset within strategic features
+        safety_end = safety_start + self.king_safety_size
+        safety_features = strategic_features[:, :, safety_start:safety_end]  # [batch_size, num_pieces, 12]
+        
+        # Average safety contribution per piece
+        piece_safety = torch.mean(safety_features, dim=2)  # [batch_size, num_pieces]
+        
+        # We want high safety scores, so penalty is negative safety
+        safety_penalty = -torch.mean(torch.sum(piece_safety, dim=1))
+        
+        return safety_penalty
+    
+    def _compute_coordination_bonus(self, piece_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute bonus for piece coordination using positional coordination features.
+        """
+        # Extract positional features
+        positional_features = piece_features[:, :, self.positional_dims]  # [batch_size, num_pieces, 80]
+        
+        # Coordination features are dimensions 18-35 in positional (18 features)
+        coordination_features = positional_features[:, :, 18:36]  # [batch_size, num_pieces, 18]
+        
+        # Average coordination score per piece
+        piece_coordination = torch.mean(coordination_features, dim=2)  # [batch_size, num_pieces]
+        
+        # Apply sigmoid
+        piece_coordination = torch.sigmoid(piece_coordination)
+        
+        # Bonus for high coordination
+        coordination_bonus = torch.mean(torch.sum(piece_coordination, dim=1))
+        
+        return coordination_bonus
+    
+    def _compute_tactical_pattern_bonus(self, piece_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute bonus for good tactical patterns using tactical features.
+        """
+        # Extract tactical features
+        tactical_features = piece_features[:, :, self.tactical_dims]  # [batch_size, num_pieces, 76]
+        
+        # Motif involvement features (dimensions 20-39 in tactical)
+        motif_features = tactical_features[:, :, 20:40]  # [batch_size, num_pieces, 20]
+        
+        # Threat generation features (dimensions 40-51 in tactical)
+        threat_features = tactical_features[:, :, 40:52]  # [batch_size, num_pieces, 12]
+        
+        # Combine motif and threat features
+        tactical_combined = torch.cat([motif_features, threat_features], dim=2)  # [batch_size, num_pieces, 32]
+        
+        # Average tactical score per piece
+        piece_tactical = torch.mean(tactical_combined, dim=2)  # [batch_size, num_pieces]
+        
+        # Apply sigmoid
+        piece_tactical = torch.sigmoid(piece_tactical)
+        
+        # Bonus for high tactical involvement
+        tactical_bonus = torch.mean(torch.sum(piece_tactical, dim=1))
+        
+        return tactical_bonus 

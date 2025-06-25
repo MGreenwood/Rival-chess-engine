@@ -76,7 +76,7 @@ class UnifiedSelfPlayRunner:
             num_heads=4,
             dropout=0.1,
             use_ultra_dense_pag=True,  # Enable ultra-dense PAG features
-            piece_dim=350,  # Ultra-dense piece features from Rust PAG
+            piece_dim=308,  # Ultra-dense piece features from Rust PAG
             critical_square_dim=95  # Ultra-dense critical square features
         )
         

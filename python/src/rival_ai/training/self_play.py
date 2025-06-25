@@ -345,7 +345,8 @@ class SelfPlay:
             c_puct=config.c_puct,
             temperature=config.temperature,
             dirichlet_alpha=config.dirichlet_alpha,
-            dirichlet_weight=config.dirichlet_weight
+            dirichlet_weight=config.dirichlet_weight,
+            device=config.device
         )
         
         # Initialize MCTS
@@ -506,18 +507,18 @@ class SelfPlay:
             # White's turn - reward positive material balance, penalize negative
             if material_balance > 0:
                 # White has material advantage - bonus to encourage maintaining it
-                material_bonus = material_balance * 0.5  # Increased from 0.1
+                material_bonus = material_balance * 1.0  # Increased from 0.5 to 1.0
             else:
-                # White is behind in material - penalty to discourage further losses
-                material_bonus = material_balance * 1.0  # Increased from 0.2
+                # White is behind in material - HEAVY penalty to discourage further losses
+                material_bonus = material_balance * 3.0  # Increased from 1.0 to 3.0 - MUCH stronger penalty!
         else:
             # Black's turn - reward negative material balance (black advantage), penalize positive
             if material_balance < 0:
                 # Black has material advantage - bonus
-                material_bonus = abs(material_balance) * 0.5  # Increased from 0.1
+                material_bonus = abs(material_balance) * 1.0  # Increased from 0.5 to 1.0
             else:
-                # Black is behind in material - penalty
-                material_bonus = -material_balance * 1.0  # Increased from 0.2
+                # Black is behind in material - HEAVY penalty
+                material_bonus = -material_balance * 3.0  # Increased from 1.0 to 3.0 - MUCH stronger penalty!
         
         # Scale material bonus based on game phase
         move_count = board.fullmove_number
@@ -540,6 +541,134 @@ class SelfPlay:
                         f"bonus={material_bonus:.3f}, turn={'white' if board.turn else 'black'}")
         
         return modified_value
+
+    def _apply_pag_tactical_evaluation(self, board: chess.Board, current_value: float) -> float:
+        """
+        Apply PAG-based tactical evaluation using ultra-dense features.
+        This leverages our 308-dimensional piece features and tactical analysis.
+        """
+        try:
+            # Extract PAG features for current position
+            pag_features = self._extract_pag_features(board)
+            if pag_features is None:
+                return current_value  # Fallback if PAG extraction fails
+            
+            pag_penalty = 0.0
+            pag_bonus = 0.0
+            
+            # Get PAG data from Rust engine
+            import rival_ai_engine
+            engine = rival_ai_engine.PyPAGEngine()
+            pag_data = engine.fen_to_dense_pag(board.fen())
+            
+            # Extract piece vulnerability from PAG features
+            if 'node_features' in pag_data and 'node_types' in pag_data:
+                node_features = pag_data['node_features']
+                node_types = pag_data['node_types']
+                
+                for i, (features, node_type) in enumerate(zip(node_features, node_types)):
+                    if node_type == 'piece' and len(features) >= 308:
+                        # Extract tactical features (first 76 dimensions are tactical)
+                        tactical_features = features[:76]
+                        
+                        # Vulnerability status features (dimensions 60-75 in tactical features)
+                        vulnerability_features = tactical_features[60:76] if len(tactical_features) >= 76 else tactical_features[-16:]
+                        
+                        # Check for hanging pieces (high vulnerability, low defense)
+                        if len(vulnerability_features) >= 16:
+                            hanging_score = vulnerability_features[0]  # is_hanging indicator
+                            pinned_score = vulnerability_features[1]   # is_pinned indicator
+                            overloaded_score = vulnerability_features[2]  # is_overloaded indicator
+                            attack_defense_ratio = vulnerability_features[3]  # attack/defense ratio
+                            
+                            # Heavy penalty for hanging pieces
+                            if hanging_score > 0.7:  # Piece is hanging
+                                piece_value = self._estimate_piece_value_from_features(features)
+                                pag_penalty += piece_value * 10.0  # MASSIVE penalty for hanging pieces
+                                logger.warning(f"🚨 HANGING PIECE DETECTED! Penalty: {piece_value * 10.0:.2f}")
+                            
+                            # Penalty for pinned pieces
+                            if pinned_score > 0.7:
+                                piece_value = self._estimate_piece_value_from_features(features)
+                                pag_penalty += piece_value * 2.0  # Strong penalty for pinned pieces
+                            
+                            # Penalty for overloaded pieces
+                            if overloaded_score > 0.7:
+                                piece_value = self._estimate_piece_value_from_features(features)
+                                pag_penalty += piece_value * 1.5  # Penalty for overloaded pieces
+                            
+                            # Penalty for poor attack/defense ratio
+                            if attack_defense_ratio > 2.0:  # Much more attacked than defended
+                                piece_value = self._estimate_piece_value_from_features(features)
+                                pag_penalty += piece_value * (attack_defense_ratio - 1.0)
+                        
+                        # Extract positional features (dimensions 76-156 are positional)
+                        if len(features) >= 156:
+                            positional_features = features[76:156]
+                            
+                            # Activity metrics (dimensions 52-65 in positional features)
+                            if len(positional_features) >= 66:
+                                activity_features = positional_features[52:66]
+                                activity_score = sum(activity_features) / len(activity_features)
+                                
+                                # Bonus for active pieces
+                                if activity_score > 0.6:
+                                    pag_bonus += activity_score * 0.5
+                                # Penalty for passive pieces
+                                elif activity_score < 0.3:
+                                    pag_penalty += (0.3 - activity_score) * 0.3
+                        
+                        # Extract strategic features (dimensions 156-216 are strategic)
+                        if len(features) >= 216:
+                            strategic_features = features[156:216]
+                            
+                            # King safety contribution (dimensions 12-23 in strategic features)
+                            if len(strategic_features) >= 24:
+                                king_safety_features = strategic_features[12:24]
+                                king_safety_score = sum(king_safety_features) / len(king_safety_features)
+                                
+                                # Bonus for pieces contributing to king safety
+                                if king_safety_score > 0.5:
+                                    pag_bonus += king_safety_score * 0.8
+                                # Penalty for pieces that weaken king safety
+                                elif king_safety_score < 0.2:
+                                    pag_penalty += (0.2 - king_safety_score) * 1.0
+            
+            # Apply PAG-based adjustments
+            net_pag_adjustment = pag_bonus - pag_penalty
+            modified_value = current_value + net_pag_adjustment
+            
+            # Log significant PAG adjustments
+            if abs(net_pag_adjustment) > 0.5:
+                logger.info(f"PAG evaluation: bonus={pag_bonus:.2f}, penalty={pag_penalty:.2f}, "
+                           f"net_adjustment={net_pag_adjustment:.2f}")
+            
+            return modified_value
+            
+        except Exception as e:
+            logger.warning(f"PAG tactical evaluation failed: {e}")
+            return current_value  # Fallback to original value
+    
+    def _estimate_piece_value_from_features(self, features) -> float:
+        """
+        Estimate piece value from PAG features.
+        This is a heuristic based on the feature patterns.
+        """
+        if len(features) < 308:
+            return 1.0  # Default pawn value
+        
+        # The piece type information should be encoded in the features
+        # For now, use a heuristic based on feature magnitudes
+        feature_magnitude = sum(abs(f) for f in features[:20]) / 20  # Average of first 20 features
+        
+        if feature_magnitude > 0.8:
+            return 9.0  # Likely queen
+        elif feature_magnitude > 0.6:
+            return 5.0  # Likely rook
+        elif feature_magnitude > 0.4:
+            return 3.0  # Likely knight/bishop
+        else:
+            return 1.0  # Likely pawn
 
     def _apply_capture_encouragement(self, board: chess.Board, current_value: float) -> float:
         """
@@ -616,11 +745,11 @@ class SelfPlay:
         
         # Apply capture bonus based on best available capture
         if best_capture_value > 0:
-            # Good capture available - strongly encourage it
-            capture_bonus = best_capture_value * 1.0  # Increased from 0.3
+            # Good capture available - VERY strongly encourage it
+            capture_bonus = best_capture_value * 2.0  # Increased from 1.0 to 2.0 - much stronger!
         elif best_capture_value < 0:
-            # Only bad captures available - penalty to discourage them
-            capture_bonus = best_capture_value * 0.3  # Increased from 0.1
+            # Only bad captures available - HEAVY penalty to discourage them
+            capture_bonus = best_capture_value * 1.0  # Increased from 0.3 to 1.0 - stronger penalty!
         
         # Scale capture bonus based on game phase
         move_count = board.fullmove_number
@@ -703,10 +832,17 @@ class SelfPlay:
             # Apply very strong bonus for obvious captures
             if exchange_value >= 3.0:  # Capturing piece worth 3+ more than capturing piece
                 # This is a very good capture (e.g., pawn capturing queen = +8)
-                obvious_bonus = exchange_value * 2.0  # Very strong bonus
+                obvious_bonus = exchange_value * 5.0  # Increased from 2.0 to 5.0 - EXTREME bonus!
                 if obvious_bonus > obvious_capture_bonus:
                     obvious_capture_bonus = obvious_bonus
                     logger.info(f"OBVIOUS CAPTURE FOUND: {capturing_piece.piece_type} capturing {captured_piece.piece_type} "
+                               f"(value: {captured_value} - {capturing_value} = +{exchange_value})")
+            elif exchange_value >= 1.0:  # Also bonus for smaller but still good captures
+                # Good capture (e.g., pawn taking knight = +2)
+                obvious_bonus = exchange_value * 3.0  # New bonus for smaller but good captures
+                if obvious_bonus > obvious_capture_bonus:
+                    obvious_capture_bonus = obvious_bonus
+                    logger.info(f"GOOD CAPTURE FOUND: {capturing_piece.piece_type} capturing {captured_piece.piece_type} "
                                f"(value: {captured_value} - {capturing_value} = +{exchange_value})")
             
             # Undo the move
@@ -925,20 +1061,22 @@ class SelfPlay:
                 mcts_start = time.time()
                 
                 # Get policy and value from MCTS
-                policy, value = self.mcts.get_action_probs(board)
+                policy, value = self.mcts.get_action_policy(board)
                 
                 mcts_time = time.time() - mcts_start
                 total_mcts_time += mcts_time
                 
                 # Apply enhanced bonuses and penalties
                 value = self._apply_material_evaluation(board, value)
-                value = self._apply_capture_encouragement(board, value)
-                value = self._apply_obvious_capture_bonus(board, value)
+                value = self._apply_pag_tactical_evaluation(board, value)
                 value = self._apply_repetition_penalty(board, value, self.game_counter)
                 value = self._apply_forward_progress_bonus(board, value)
                 
                 # Apply aggressive play bonuses to policy
                 policy = self._apply_aggressive_play_bonus(board, policy, move_count)
+                
+                # Apply PAG-based policy adjustments using ultra-dense features
+                policy = self._apply_pag_policy_adjustments(board, policy, move_count)
                 
                 # Force decisive play based on move count
                 policy = self._force_decisive_play(board, policy, move_count)
@@ -1083,11 +1221,30 @@ class SelfPlay:
                         data = board_to_hetero_data(board)
                         data = data.to(self.config.device)
                         
-                        # Get policy and value from model
-                        with torch.no_grad():
-                            policy, value = self.model(data)
-                            policy = policy.squeeze(0)
-                            value = value.squeeze()
+                        # Get policy and value from MCTS search
+                        try:
+                            policy, value = self.mcts.get_action_policy(board)
+                            if isinstance(policy, dict):
+                                # Convert dict to tensor
+                                policy_array = np.zeros(5312, dtype=np.float32)
+                                for move_idx, prob in policy.items():
+                                    if 0 <= move_idx < 5312:
+                                        policy_array[move_idx] = prob
+                                policy = torch.from_numpy(policy_array).to(self.config.device)
+                            elif not isinstance(policy, torch.Tensor):
+                                policy = torch.tensor(policy, dtype=torch.float32, device=self.config.device)
+                            
+                            # Ensure policy is the right shape
+                            if policy.dim() > 1:
+                                policy = policy.squeeze(0)
+                                
+                        except Exception as e:
+                            logger.warning(f"MCTS search failed, using direct model evaluation: {e}")
+                            # Fallback to direct model evaluation
+                            with torch.no_grad():
+                                policy, value = self.model(data)
+                                policy = policy.squeeze(0)
+                                value = value.squeeze()
                         
                         # Convert policy to numpy if it's a tensor
                         if isinstance(policy, torch.Tensor):
@@ -1464,6 +1621,186 @@ class SelfPlay:
         
         return legal_moves[selected_idx]
 
+    def _apply_pag_policy_adjustments(self, board: chess.Board, policy: torch.Tensor, move_count: int) -> torch.Tensor:
+        """Apply PAG-based policy adjustments using ultra-dense features."""
+        try:
+            import rival_ai_engine
+            engine = rival_ai_engine.PyPAGEngine()
+            
+            # Get current position PAG features
+            current_pag = engine.fen_to_dense_pag(board.fen())
+            if 'node_features' not in current_pag or 'node_types' not in current_pag:
+                return policy
+            
+            policy = policy.clone()
+            legal_moves = list(board.legal_moves)
+            
+            for move in legal_moves:
+                move_idx = self.mcts._move_to_move_idx(move)
+                if move_idx is None or move_idx >= 5312:
+                    continue
+                
+                # Simulate the move to get PAG features after the move
+                board.push(move)
+                try:
+                    new_pag = engine.fen_to_dense_pag(board.fen())
+                    board.pop()
+                    
+                    if 'node_features' not in new_pag or 'node_types' not in new_pag:
+                        continue
+                    
+                    # Calculate PAG-based move evaluation
+                    move_bonus = self._evaluate_move_with_pag(current_pag, new_pag, move, board)
+                    
+                    # Apply the bonus/penalty to the policy
+                    if move_bonus != 0:
+                        policy[move_idx] *= (1.0 + move_bonus)
+                        
+                        # Log significant adjustments
+                        if abs(move_bonus) > 0.5:
+                            logger.info(f"PAG policy adjustment for {move}: {move_bonus:.3f}")
+                
+                except Exception as e:
+                    board.pop()
+                    logger.debug(f"PAG evaluation failed for move {move}: {e}")
+                    continue
+            
+            return policy
+            
+        except Exception as e:
+            logger.warning(f"PAG policy adjustments failed: {e}")
+            return policy
+    
+    def _evaluate_move_with_pag(self, before_pag, after_pag, move: chess.Move, board: chess.Board) -> float:
+        """
+        Evaluate a move based on PAG feature changes.
+        Returns a bonus/penalty multiplier for the move probability.
+        """
+        move_bonus = 0.0
+        
+        try:
+            before_features = before_pag['node_features']
+            before_types = before_pag['node_types']
+            after_features = after_pag['node_features']
+            after_types = after_pag['node_types']
+            
+            # Count hanging pieces before and after
+            hanging_before = self._count_hanging_pieces(before_features, before_types)
+            hanging_after = self._count_hanging_pieces(after_features, after_types)
+            
+            # MASSIVE bonus for moves that capture hanging pieces
+            if hanging_after < hanging_before:
+                pieces_saved = hanging_before - hanging_after
+                move_bonus += pieces_saved * 3.0  # Huge bonus for reducing hanging pieces
+                logger.info(f"🎯 Move {move} reduces hanging pieces by {pieces_saved}")
+            
+            # MASSIVE penalty for moves that create hanging pieces
+            elif hanging_after > hanging_before:
+                pieces_hung = hanging_after - hanging_before
+                move_bonus -= pieces_hung * 5.0  # Huge penalty for creating hanging pieces
+                logger.warning(f"🚨 Move {move} creates {pieces_hung} hanging pieces!")
+            
+            # Evaluate piece activity changes
+            activity_before = self._calculate_total_activity(before_features, before_types)
+            activity_after = self._calculate_total_activity(after_features, after_types)
+            activity_change = activity_after - activity_before
+            
+            # Bonus for improving piece activity
+            if activity_change > 0.1:
+                move_bonus += activity_change * 2.0
+            elif activity_change < -0.1:
+                move_bonus += activity_change * 1.0  # Penalty for reducing activity
+            
+            # Evaluate king safety changes
+            king_safety_before = self._calculate_king_safety(before_features, before_types)
+            king_safety_after = self._calculate_king_safety(after_features, after_types)
+            safety_change = king_safety_after - king_safety_before
+            
+            # Strong bonus/penalty for king safety changes
+            if safety_change > 0.1:
+                move_bonus += safety_change * 3.0  # Strong bonus for improving king safety
+            elif safety_change < -0.1:
+                move_bonus += safety_change * 4.0  # Strong penalty for weakening king safety
+            
+            # Special bonuses for tactical moves
+            if board.is_capture(move):
+                captured_piece = board.piece_at(move.to_square)
+                moving_piece = board.piece_at(move.from_square)
+                
+                if captured_piece and moving_piece:
+                    piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, 
+                                  chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
+                    captured_value = piece_values.get(captured_piece.piece_type, 0)
+                    moving_value = piece_values.get(moving_piece.piece_type, 0)
+                    
+                    # Extra bonus for good captures
+                    if captured_value > moving_value:
+                        move_bonus += (captured_value - moving_value) * 1.5
+                    # Penalty for bad captures
+                    elif captured_value < moving_value:
+                        move_bonus -= (moving_value - captured_value) * 2.0
+            
+            # Bonus for checks that improve position
+            if board.gives_check(move):
+                move_bonus += 0.8
+            
+            return move_bonus
+            
+        except Exception as e:
+            logger.debug(f"PAG move evaluation failed: {e}")
+            return 0.0
+    
+    def _count_hanging_pieces(self, node_features, node_types) -> int:
+        """Count hanging pieces from PAG features."""
+        hanging_count = 0
+        
+        for features, node_type in zip(node_features, node_types):
+            if node_type == 'piece' and len(features) >= 76:
+                # Check vulnerability features (first feature in vulnerability is hanging indicator)
+                tactical_features = features[:76]
+                if len(tactical_features) >= 61:  # Ensure we have vulnerability features
+                    vulnerability_features = tactical_features[60:76]
+                    hanging_score = vulnerability_features[0] if len(vulnerability_features) > 0 else 0.0
+                    
+                    if hanging_score > 0.7:  # Threshold for considering piece hanging
+                        hanging_count += 1
+        
+        return hanging_count
+    
+    def _calculate_total_activity(self, node_features, node_types) -> float:
+        """Calculate total piece activity from PAG features."""
+        total_activity = 0.0
+        piece_count = 0
+        
+        for features, node_type in zip(node_features, node_types):
+            if node_type == 'piece' and len(features) >= 156:
+                # Activity metrics are in positional features (dimensions 52-65)
+                positional_features = features[76:156]
+                if len(positional_features) >= 66:
+                    activity_features = positional_features[52:66]
+                    activity_score = sum(activity_features) / len(activity_features)
+                    total_activity += activity_score
+                    piece_count += 1
+        
+        return total_activity / max(piece_count, 1)
+    
+    def _calculate_king_safety(self, node_features, node_types) -> float:
+        """Calculate king safety from PAG features."""
+        total_safety = 0.0
+        piece_count = 0
+        
+        for features, node_type in zip(node_features, node_types):
+            if node_type == 'piece' and len(features) >= 216:
+                # King safety features are in strategic features (dimensions 12-23)
+                strategic_features = features[156:216]
+                if len(strategic_features) >= 24:
+                    king_safety_features = strategic_features[12:24]
+                    safety_score = sum(king_safety_features) / len(king_safety_features)
+                    total_safety += safety_score
+                    piece_count += 1
+        
+        return total_safety / max(piece_count, 1)
+
 def generate_game(model: ChessGNN, config: SelfPlayConfig) -> GameRecord:
     """Generate a single game of self-play.
     
@@ -1477,7 +1814,16 @@ def generate_game(model: ChessGNN, config: SelfPlayConfig) -> GameRecord:
     board = chess.Board()
     game_record = GameRecord()
     move_count = 0
-    mcts = MCTS(model, config)  # Create MCTS instance for move index conversion
+    # Create proper MCTS config for the standalone function
+    mcts_config = MCTSConfig(
+        num_simulations=config.num_simulations,
+        c_puct=config.c_puct,
+        temperature=config.temperature,
+        dirichlet_alpha=config.dirichlet_alpha,
+        dirichlet_weight=config.dirichlet_weight,
+        device=config.device
+    )
+    mcts = MCTS(model, mcts_config)  # Create MCTS instance for move index conversion
     
     while not board.is_game_over() and move_count < config.max_moves:
         # Record current state

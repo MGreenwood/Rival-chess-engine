@@ -1,4 +1,4 @@
-use rival_ai::{
+use rival_ai_engine::{
     engine::Engine,
     bridge::python::ModelBridge,
 };

@@ -446,7 +446,9 @@ class MCTS:
                     move_idx = self._move_to_move_idx(move)
                     if move_idx is not None:
                         prior_value = float(policy[move_idx].item())
-                        node.children[move] = MCTSNode(prior=prior_value)
+                        child_node = MCTSNode(prior=prior_value)
+                        child_node.parent = node  # CRITICAL FIX: Set parent relationship
+                        node.children[move] = child_node
             
             # Evaluation
             if search_board.is_game_over():

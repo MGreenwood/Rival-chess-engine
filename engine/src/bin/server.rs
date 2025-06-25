@@ -21,7 +21,7 @@ use std::fs;
 use pyo3::types::PyDict;
 use uuid;
 use chess::MoveGen;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use tokio::time::{sleep, Duration};
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,11 +51,11 @@ struct Args {
     training_games_threshold: usize,
     
     /// Enable self-play background generation
-    #[arg(long, action = clap::ArgAction::SetFalse)]
+    #[arg(long, default_value = "true")]
     enable_self_play: bool,
     
     /// Enable background training
-    #[arg(long, action = clap::ArgAction::SetFalse)]
+    #[arg(long, default_value = "true")]
     enable_training: bool,
     
     /// Enable TensorBoard logging for training
@@ -528,6 +528,8 @@ pub struct AppState {
     pub cached_stats: Arc<Mutex<ServerStats>>,
     // In-memory queue of last 10 completed games (much faster than disk I/O)
     pub recent_completed_games: Arc<Mutex<VecDeque<GameMetadata>>>,
+    // Track if self-play generation is currently running
+    pub is_generating_selfplay: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -606,6 +608,20 @@ struct StartVotingResponse {
     success: bool,
     error_message: Option<String>,
     game_state: CommunityGameStateResponse,
+}
+
+#[derive(Deserialize)]
+struct HeartbeatRequest {
+    game_id: String,
+    mode: String,
+}
+
+#[derive(Serialize)]
+struct HeartbeatResponse {
+    success: bool,
+    timestamp: String,
+    game_exists: bool,
+    game_status: Option<String>,
 }
 
 fn parse_move(move_str: &str) -> Result<ChessMove, String> {
@@ -2071,6 +2087,16 @@ async fn get_self_play_status(data: web::Data<AppState>) -> impl Responder {
     let active_players = data.active_players.load(Ordering::SeqCst);
     let current_self_play = data.self_play_games.load(Ordering::SeqCst);
     let is_training = data.is_training.load(Ordering::SeqCst);
+    let is_generating = data.is_generating_selfplay.load(Ordering::SeqCst);
+    
+    // Check community engine status
+    let community_busy = {
+        if let Ok(game) = data.game.try_lock() {
+            game.engine_thinking && (!game.votes.is_empty() || game.is_voting_phase() || game.move_history.len() > 0)
+        } else {
+            false
+        }
+    };
     
     // Get GPU utilization
     let mut gpu_util = 0.0;
@@ -2090,20 +2116,33 @@ async fn get_self_play_status(data: web::Data<AppState>) -> impl Responder {
         Ok::<_, PyErr>(())
     }).ok();
     
+    // Determine status message
+    let status = if is_generating {
+        "🎮 Generating self-play games..."
+    } else if is_training {
+        "🔧 Training active - waiting to generate"
+    } else if community_busy {
+        "🛡️ Community engine busy - waiting to generate"
+    } else if active_players == 0 {
+        "🚀 Zero players - ready for maximum generation"
+    } else if active_players <= 2 {
+        "📈 Low traffic - moderate generation"
+    } else if active_players <= 10 {
+        "⚖️ Medium traffic - balanced generation"
+    } else {
+        "👥 High traffic - minimal generation"
+    };
+    
     HttpResponse::Ok().json(json!({
         "current_self_play_games": current_self_play,
         "active_players": active_players,
         "gpu_utilization": gpu_util,
         "is_training": is_training,
-        "status": if is_training {
-            "Training mode - minimal self-play"
-        } else if active_players == 0 {
-            "Zero traffic - rapid scaling mode"
-        } else if active_players <= 2 {
-            "Low traffic - moderate scaling"
-        } else {
-            "High traffic - conservative scaling"
-        }
+        "is_generating": is_generating,
+        "community_busy": community_busy,
+        "can_generate": !is_training && !community_busy && !is_generating,
+        "status": status,
+        "strategy": "AGGRESSIVE - Generate continuously when possible"
     }))
 }
 
@@ -2241,6 +2280,8 @@ class UnifiedFallbackModel:
             })),
             // Initialize empty queue for recent completed games (max 10)
             recent_completed_games: Arc::new(Mutex::new(VecDeque::with_capacity(10))),
+            // Initialize self-play generation tracking
+            is_generating_selfplay: Arc::new(AtomicBool::new(false)),
         });
         
         // Add cleanup task
@@ -2283,11 +2324,14 @@ class UnifiedFallbackModel:
         }
         
         if args.enable_self_play {
+            eprintln!("🎮 Self-play background task: ENABLED");
             let app_state_clone = app_state.clone();
             let args_clone = args.clone();
             actix_web::rt::spawn(async move {
                 background_self_play_task(app_state_clone, args_clone).await;
             });
+        } else {
+            eprintln!("⚠️ Self-play background task: DISABLED");
         }
         
         println!("💾 Game persistence: Stats survive server restarts, games archived after training");
@@ -2386,6 +2430,7 @@ class UnifiedFallbackModel:
             .service(web::resource("/api/community/start-voting").route(web::post().to(start_voting_round)))
             .service(web::resource("/api/community/force-resolve").route(web::post().to(force_resolve_voting)))
             .service(web::resource("/api/game/sync/{game_id}").route(web::get().to(sync_game_state)))
+            .service(web::resource("/api/game/heartbeat").route(web::post().to(game_heartbeat)))
             .service(web::resource("/games").route(web::get().to(list_games)))
             .service(web::resource("/recent-games").route(web::get().to(get_recent_games)))
             .service(web::resource("/games/{id}").route(web::get().to(get_game)))
@@ -2739,6 +2784,13 @@ async fn generate_self_play_games(
         path.clone()
     };
     
+    eprintln!("🐍 About to execute Python self-play script...");
+    eprintln!("   Command: python ../python/scripts/server_self_play.py");
+    eprintln!("   Model path: {}", current_model_path);
+    eprintln!("   Save dir: {}", save_dir);
+    eprintln!("   Num games: {}", num_games);
+    eprintln!("   Training threshold: {}", training_threshold);
+    
     let output = Command::new("python")
         .arg("../python/scripts/server_self_play.py")
         .arg("--model-path")
@@ -2754,6 +2806,11 @@ async fn generate_self_play_games(
         .output()
         .await
         .map_err(|e| format!("Failed to execute Python script: {}", e))?;
+    
+    eprintln!("🐍 Python script execution completed!");
+    eprintln!("   Exit status: {}", output.status);
+    eprintln!("   Stdout length: {} bytes", output.stdout.len());
+    eprintln!("   Stderr length: {} bytes", output.stderr.len());
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2809,160 +2866,163 @@ async fn run_training_session(args: &Args, _num_games: usize) -> Result<String, 
     }
 }
 
-// Also update the background_self_play_task function with the correct error type annotation
+// Aggressive self-play task - generate games continuously when possible
 async fn background_self_play_task(
     data: web::Data<AppState>,
     args: Args,
 ) {
-    let target_gpu_util = args.target_gpu_utilization;  // Use configurable target
-    let min_self_play = 30;  // Increased from 20 for faster training data collection
-    let max_self_play = args.max_self_play_games;     // Use configurable max
-    let generation_interval = 60;  // Reduced from 90s to 60s for more aggressive generation
+    let target_gpu_util = args.target_gpu_utilization;
+    let min_self_play = 10;  // Reduced for smaller continuous batches
+    let max_self_play = args.max_self_play_games;
+    let check_interval = 10;  // Check every 10 seconds instead of 30
     
-    println!("🎮 Self-play scaling initialized:");
-    println!("   📊 Target GPU utilization: {:.1}%", target_gpu_util * 100.0);
-    println!("   📈 Scale range: {} - {} games", min_self_play, max_self_play);
-    println!("   🕐 Generation interval: {}s", generation_interval);
-    println!("   🛡️ Community game protection: ENABLED");
+    eprintln!("🎮 AGGRESSIVE Self-play task STARTING!");
+    eprintln!("   📊 Target GPU utilization: {:.1}%", target_gpu_util * 100.0);
+    eprintln!("   📈 Scale range: {} - {} games", min_self_play, max_self_play);
+    eprintln!("   🕐 Check interval: {}s (CONTINUOUS GENERATION)", check_interval);
+    eprintln!("   🚀 Strategy: Generate games whenever possible!");
+    eprintln!("   🛡️ Community game protection: ENABLED");
+    eprintln!("   ⏰ Task will check conditions every {} seconds...", check_interval);
     
-    let mut last_generation = std::time::Instant::now();
-    // Remove initial assignment of rapid_scale_mode - it will be declared inline
+    // Log initial conditions
+    eprintln!("🔍 Initial conditions check...");
+    let initial_players = data.active_players.load(Ordering::SeqCst);
+    let initial_games = data.self_play_games.load(Ordering::SeqCst);
+    let initial_training = data.is_training.load(Ordering::SeqCst);
+    let initial_generating = data.is_generating_selfplay.load(Ordering::SeqCst);
+    eprintln!("   Players: {}, Games: {}, Training: {}, Generating: {}", 
+             initial_players, initial_games, initial_training, initial_generating);
     
     loop {
         let active_players = data.active_players.load(Ordering::SeqCst);
         let current_self_play = data.self_play_games.load(Ordering::SeqCst);
         let is_training = data.is_training.load(Ordering::SeqCst);
+        let is_generating = data.is_generating_selfplay.load(Ordering::SeqCst);
         
         // Check if community engine is busy (highest priority)
         let community_busy = {
             if let Ok(game) = data.game.try_lock() {
-                game.engine_thinking
+                game.engine_thinking && (!game.votes.is_empty() || game.is_voting_phase() || game.move_history.len() > 0)
             } else {
-                true // Consider busy if we can't check
+                false
             }
         };
         
-        // Get GPU utilization
-        let mut gpu_util = 0.0;
-        Python::with_gil(|py| {
-            if let Ok(torch) = PyModule::import(py, "torch") {
-                if let Ok(true) = torch.getattr("cuda")?.call_method0("is_available")?.extract() {
-                    if let Ok(nvml) = PyModule::import(py, "pynvml") {
-                        let _ = nvml.call_method0("nvmlInit");
-                        if let Ok(handle) = nvml.call_method1("nvmlDeviceGetHandleByIndex", (0,)) {
-                            if let Ok(util) = handle.call_method0("nvmlDeviceGetUtilizationRates") {
-                                gpu_util = util.getattr("gpu")?.extract::<f32>()? / 100.0;
-                            }
-                        }
-                    }
-                }
-            }
-            Ok::<_, PyErr>(())
-        }).ok();
-
-        // Calculate ideal number of self-play games with sophisticated scaling
-        let mut new_self_play = current_self_play;
+        // DEBUG: Log current conditions (but not too frequently)
+        static LAST_CONDITION_LOG: AtomicU64 = AtomicU64::new(0);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         
-        // Declare rapid_scale_mode inline to avoid unused assignment warning
-        let rapid_scale_mode;
+        let last_log = LAST_CONDITION_LOG.load(Ordering::Relaxed);
+        if now_secs.saturating_sub(last_log) >= 30 { // Log every 30 seconds
+            eprintln!("🔍 Self-play conditions: players={}, current_games={}, training={}, generating={}, community_busy={}", 
+                     active_players, current_self_play, is_training, is_generating, community_busy);
+            LAST_CONDITION_LOG.store(now_secs, Ordering::Relaxed);
+        }
+        
+        // Calculate ideal number of self-play games
+        let new_self_play;
         
         // PRIORITY 1: Community engine protection
         if community_busy {
-            // Drastically reduce self-play when community engine is thinking
             new_self_play = 1;
-            rapid_scale_mode = false;
             eprintln!("🛡️ Community engine busy - reducing self-play to minimum");
         }
         // PRIORITY 2: Training protection  
         else if is_training {
-            // During training, reduce to minimum to free up resources
             new_self_play = min_self_play;
-            rapid_scale_mode = false;
             eprintln!("🔧 Training active - reducing self-play to minimum ({})", min_self_play);
         } 
-        // PRIORITY 3: Normal scaling logic
+        // PRIORITY 3: Aggressive scaling based on traffic - SMALLER BATCHES FOR CONTINUOUS GENERATION
         else if active_players == 0 {
-            // No active players - this is the perfect time to scale up aggressively
-            rapid_scale_mode = true;
-            
-            if gpu_util < 0.5 {
-                // Very low GPU usage - rapid scale up (more aggressive)
-                let scale_factor = if current_self_play < 100 { 15 } else { 10 };
-                new_self_play = (current_self_play + scale_factor).min(max_self_play);
-            } else if gpu_util < target_gpu_util {
-                // Moderate GPU usage - steady scale up (more aggressive)
-                let scale_factor = if current_self_play < 50 { 10 } else { 5 };
-                new_self_play = (current_self_play + scale_factor).min(max_self_play);
-            } else if gpu_util > target_gpu_util + 0.1 {
-                // GPU getting saturated - scale back
-                new_self_play = current_self_play.saturating_sub(3).max(min_self_play);
-            }
+            // No active players - moderate batch size since we generate continuously
+            new_self_play = 50;  // Reduced from max_self_play to reasonable batch size
+            eprintln!("🚀 Zero players - continuous generation ({})", new_self_play);
         } else if active_players <= 2 {
-            // Low traffic - aggressive scaling for training
-            rapid_scale_mode = true;
-            
-            // Since GPU util is always 0%, ignore GPU constraints and focus on training
-            new_self_play = (current_self_play + 8).min(150);  // Increased from +5 to +8, cap from 100 to 150
+            // Low traffic - moderate scaling
+            new_self_play = 30;  // Smaller consistent batches
         } else if active_players <= 5 {
-            // Moderate traffic - training-focused with 50 games
-            rapid_scale_mode = false;
-            new_self_play = (current_self_play + 2).min(50);  // Up to 50 games for 3-5 players
+            // Moderate traffic - balanced
+            new_self_play = 20;  // Even smaller to be responsive
         } else if active_players <= 10 {
-            // Higher traffic - balanced training generation 
-            rapid_scale_mode = false;
-            new_self_play = current_self_play.max(25).min(30);  // 25-30 games for 6-10 players
+            // Higher traffic - conservative
+            new_self_play = 15;  // Small batches
         } else {
-            // Very high traffic - use minimum games for consistent training data
-            rapid_scale_mode = false;
-            new_self_play = min_self_play;  // Use minimum games (20) even with high traffic
+            // Very high traffic - minimum for stability
+            new_self_play = 10;  // Very small batches
         }
         
-        // Apply the scaling decision
+        // Apply scaling decision
         if new_self_play != current_self_play {
             data.self_play_games.store(new_self_play, Ordering::SeqCst);
-            
-            // Self-play scaling adjusted (status available via API)
+            eprintln!("📊 Self-play scaled: {} → {} games", current_self_play, new_self_play);
         }
         
-        // Actually generate self-play games periodically
-        if last_generation.elapsed().as_secs() >= generation_interval && new_self_play > 0 {
-            if !is_training && !community_busy {
-                match generate_self_play_games(
-                    data.clone(),
-                    new_self_play,
-                    &args.games_dir,
-                    &args.model_path,
-                    args.training_games_threshold
-                ).await {
-                    Ok(()) => {
-                        last_generation = std::time::Instant::now();
-                    },
-                    Err(e) => {
-                        eprintln!("❌ Failed to generate self-play games: {}", e);
-                        // Scale back on failure to avoid repeated failures
-                        if new_self_play > 10 {
-                            let reduced = (new_self_play / 2).max(min_self_play);
-                            data.self_play_games.store(reduced, Ordering::SeqCst);
-                            eprintln!("⚠️ Reduced self-play games to {} due to generation failure", reduced);
-                        }
+        // 🚀 AGGRESSIVE GENERATION: Generate if conditions are good and not already generating
+        let can_generate = !is_training && !community_busy && !is_generating && new_self_play > 0;
+        
+        if can_generate {
+            eprintln!("🚀🚀🚀 STARTING SELF-PLAY GENERATION: {} games 🚀🚀🚀", new_self_play);
+            
+            // Set generation flag
+            data.is_generating_selfplay.store(true, Ordering::SeqCst);
+            
+            match generate_self_play_games(
+                data.clone(),
+                new_self_play,
+                &args.games_dir,
+                &args.model_path,
+                args.training_games_threshold
+            ).await {
+                Ok(()) => {
+                    eprintln!("✅ Self-play generation completed successfully");
+                },
+                Err(e) => {
+                    eprintln!("❌ Failed to generate self-play games: {}", e);
+                    // Scale back on failure
+                    if new_self_play > 10 {
+                        let reduced = (new_self_play / 2).max(min_self_play);
+                        data.self_play_games.store(reduced, Ordering::SeqCst);
+                        eprintln!("⚠️ Reduced self-play games to {} due to failure", reduced);
                     }
                 }
             }
+            
+            // Clear generation flag
+            data.is_generating_selfplay.store(false, Ordering::SeqCst);
+            
+        } else {
+            // Log why we're not generating (but not too frequently)
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_LOG_SECS: AtomicU64 = AtomicU64::new(0);
+            
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            
+            let last_log_secs = LAST_LOG_SECS.load(Ordering::Relaxed);
+            if now_secs.saturating_sub(last_log_secs) >= 60 { // Log every minute
+                if is_training {
+                    eprintln!("⏸️ Waiting: Training active");
+                } else if community_busy {
+                    eprintln!("⏸️ Waiting: Community engine busy");
+                } else if is_generating {
+                    eprintln!("⏸️ Waiting: Generation in progress");
+                } else if new_self_play == 0 {
+                    eprintln!("⏸️ Waiting: Zero games configured");
+                } else {
+                    eprintln!("⏸️ Conditions met, generating continuously");
+                }
+                LAST_LOG_SECS.store(now_secs, Ordering::Relaxed);
+            }
         }
         
-        // Log current status periodically (every 5 minutes)
-        if last_generation.elapsed().as_secs() % 300 == 0 && last_generation.elapsed().as_secs() > 0 {
-            eprintln!("📊 Self-play status: {} games, GPU: {:.1}%, Players: {}, Mode: {}", 
-                new_self_play, gpu_util * 100.0, active_players, 
-                if community_busy { "Community Priority" } 
-                else if rapid_scale_mode { "Training Focus" } 
-                else if active_players <= 5 { "Training Balanced" }
-                else { "User Priority" });
-        }
-        
-        // Yield to prevent blocking other tasks
+        // Quick check interval for responsiveness
         tokio::task::yield_now().await;
-        sleep(Duration::from_secs(30)).await;
+        sleep(Duration::from_secs(check_interval)).await;
     }
 }
 
@@ -3234,6 +3294,66 @@ async fn sync_game_state(
             }))
         }
     }
+}
+
+async fn game_heartbeat(
+    data: web::Data<AppState>,
+    req: web::Json<HeartbeatRequest>,
+) -> impl Responder {
+    let game_id = &req.game_id;
+    let mode = &req.mode;
+    
+    // Check if game exists based on mode
+    let game_exists = match mode.as_str() {
+        "single_player" => {
+            // Check active games first
+            {
+                let active_games = recover_mutex(data.active_games.lock());
+                if active_games.contains_key(game_id) {
+                    true
+                } else {
+                    // Check persistent storage
+                    data.game_storage.load_game(game_id, &GameMode::SinglePlayer).is_ok()
+                }
+            }
+        },
+        "community" => {
+            // For community games, check if the game ID matches current community game
+            let game = recover_mutex(data.game.lock());
+            game.game_id == *game_id
+        },
+        _ => false,
+    };
+    
+    let game_status = if game_exists {
+        match mode.as_str() {
+            "single_player" => {
+                // Try to get status from active games first
+                let active_games = recover_mutex(data.active_games.lock());
+                if let Some(game_state) = active_games.get(game_id) {
+                    Some(game_state.metadata.status.to_string())
+                } else if let Ok(game_state) = data.game_storage.load_game(game_id, &GameMode::SinglePlayer) {
+                    Some(game_state.metadata.status.to_string())
+                } else {
+                    None
+                }
+            },
+            "community" => {
+                let game = recover_mutex(data.game.lock());
+                Some(game.status.to_string())
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+    
+    HttpResponse::Ok().json(HeartbeatResponse {
+        success: true,
+        timestamp: Utc::now().to_rfc3339(),
+        game_exists,
+        game_status,
+    })
 }
 
 // Helper function to update cache when community games complete

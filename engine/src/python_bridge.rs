@@ -127,14 +127,14 @@ impl PyPAGEngine {
             
             // Piece nodes
             let piece_data = PyDict::new(py);
-            let (piece_features, _, piece_ids) = self.extract_piece_node_features(&pag, py)?;
+            let (piece_features, piece_types, piece_ids) = self.extract_piece_node_features(&pag, py)?;
             piece_data.set_item("x", piece_features)?;
             piece_data.set_item("node_ids", piece_ids)?;
             hetero_data.set_item("piece", piece_data)?;
             
             // Critical square nodes  
             let square_data = PyDict::new(py);
-            let (square_features, _, square_ids) = self.extract_square_node_features(&pag, py)?;
+            let (square_features, square_types, square_ids) = self.extract_square_node_features(&pag, py)?;
             square_data.set_item("x", square_features)?;
             square_data.set_item("node_ids", square_ids)?;
             hetero_data.set_item("critical_square", square_data)?;
@@ -178,43 +178,44 @@ impl PyPAGEngine {
         let piece_ids = pag.get_piece_ids();
         let square_ids = pag.get_critical_square_ids();
         
-        // Process piece nodes
+        // Process piece nodes FIRST (308 dimensions)
         for &piece_id in &piece_ids {
             if let Some(node) = pag.get_node(piece_id) {
-                let features = node.to_feature_vector();
-                all_features.push(features);
-                node_types.push("piece".to_string());
-                node_ids.push(piece_id);
-            }
-        }
-        
-        // Process critical square nodes
-        for &square_id in &square_ids {
-            if let Some(node) = pag.get_node(square_id) {
-                let features = node.to_feature_vector();
-                all_features.push(features);
-                node_types.push("critical_square".to_string());
-                node_ids.push(square_id);
-            }
-        }
-        
-        // Convert to numpy arrays
-        let max_features = all_features.iter().map(|f| f.len()).max().unwrap_or(0);
-        let mut feature_matrix = vec![vec![0.0f32; max_features]; all_features.len()];
-        
-        for (i, features) in all_features.iter().enumerate() {
-            for (j, &value) in features.iter().enumerate() {
-                if j < max_features {
-                    feature_matrix[i][j] = value;
+                if let NodeType::DensePiece(_) = node {
+                    let features = node.to_feature_vector();
+                    assert_eq!(features.len(), 308, "Piece features should be 308 dimensions");
+                    all_features.push(features);
+                    node_types.push("piece".to_string());
+                    node_ids.push(piece_id);
                 }
             }
         }
         
-        let features_array = PyArray2::from_vec2(py, &feature_matrix)?.to_owned();
+        // Process critical square nodes SECOND (95 dimensions)
+        for &square_id in &square_ids {
+            if let Some(node) = pag.get_node(square_id) {
+                if let NodeType::DenseCriticalSquare(_) = node {
+                    let features = node.to_feature_vector();
+                    assert_eq!(features.len(), 95, "Square features should be 95 dimensions");
+                    all_features.push(features);
+                    node_types.push("critical_square".to_string());
+                    node_ids.push(square_id);
+                }
+            }
+        }
+        
+        // FIXED: Don't pad to max dimensions - keep original dimensions
+        // Convert each feature vector directly to maintain correct dimensions
+        let features_list = PyList::empty(py);
+        for features in all_features {
+            let feature_array = numpy::PyArray1::from_vec(py, features);
+            features_list.append(feature_array)?;
+        }
+        
         let types_list = PyList::new(py, &node_types);
         let ids_list = PyList::new(py, &node_ids);
         
-        Ok((features_array.into(), types_list.into(), ids_list.into()))
+        Ok((features_list.into(), types_list.into(), ids_list.into()))
     }
     
     /// Extract edge features as numpy arrays
@@ -281,7 +282,17 @@ impl PyPAGEngine {
             }
         }
         
-        let feature_matrix = vec![vec![0.0f32; 308]; piece_features.len()]; // 308 = DensePiece feature count
+        let max_features = piece_features.iter().map(|f| f.len()).max().unwrap_or(308);
+        let mut feature_matrix = vec![vec![0.0f32; max_features]; piece_features.len()];
+        
+        for (i, features) in piece_features.iter().enumerate() {
+            for (j, &value) in features.iter().enumerate() {
+                if j < max_features {
+                    feature_matrix[i][j] = value;
+                }
+            }
+        }
+        
         let features_array = PyArray2::from_vec2(py, &feature_matrix)?.to_owned();
         let types_list = PyList::new(py, &piece_types);
         let ids_list = PyList::new(py, &piece_ids);
@@ -306,7 +317,17 @@ impl PyPAGEngine {
             }
         }
         
-        let feature_matrix = vec![vec![0.0f32; 95]; square_features.len()]; // 95 = DenseCriticalSquare feature count
+        let max_features = square_features.iter().map(|f| f.len()).max().unwrap_or(95);
+        let mut feature_matrix = vec![vec![0.0f32; max_features]; square_features.len()];
+        
+        for (i, features) in square_features.iter().enumerate() {
+            for (j, &value) in features.iter().enumerate() {
+                if j < max_features {
+                    feature_matrix[i][j] = value;
+                }
+            }
+        }
+        
         let features_array = PyArray2::from_vec2(py, &feature_matrix)?.to_owned();
         let types_list = PyList::new(py, &square_types);
         let ids_list = PyList::new(py, &square_ids);
