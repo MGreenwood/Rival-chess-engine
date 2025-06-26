@@ -9,6 +9,6 @@ name = "rival_ai_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.25.0"
-rival_ai = { path = "../engine" }
+pyo3 = "0.20"
+rival_ai_engine = { path = "../engine" }
 serde_json = "1.0"

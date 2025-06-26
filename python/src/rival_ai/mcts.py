@@ -394,10 +394,10 @@ class MCTS:
             while node.is_expanded and not search_board.is_game_over():
                 # Get UCB scores for all children
                 ucb_scores = {}
-                for move, child in node.children.items():
+                for move_idx, child in node.children.items():
                     # Calculate UCB score
                     if child.visit_count == 0:
-                        ucb_scores[move] = float('inf')
+                        ucb_scores[move_idx] = float('inf')
                     else:
                         # UCB = Q + c_puct * P * sqrt(N) / (1 + n)
                         q_value = float(-child.value_sum / child.visit_count)
@@ -408,18 +408,23 @@ class MCTS:
                         # Calculate UCB score with explicit float arithmetic
                         exploration_term = self.config.c_puct * prior * math.sqrt(parent_visits) / (1.0 + child_visits)
                         ucb_score = q_value + exploration_term
-                        ucb_scores[move] = ucb_score
+                        ucb_scores[move_idx] = ucb_score
                 
                 # Select move with highest UCB score
                 if not ucb_scores:
                     break
                     
-                move = max(ucb_scores.items(), key=lambda x: x[1])[0]
+                selected_move_idx = max(ucb_scores.items(), key=lambda x: x[1])[0]
+                
+                # Convert move index back to chess move
+                move = self._move_idx_to_move(selected_move_idx, search_board)
+                if move is None:
+                    break
                 
                 # Make move
                 search_board.push(move)
                 current_move_count += 1
-                node = node.children[move]
+                node = node.children[selected_move_idx]
             
             # Expansion
             if not search_board.is_game_over() and not node.is_expanded:
@@ -448,7 +453,7 @@ class MCTS:
                         prior_value = float(policy[move_idx].item())
                         child_node = MCTSNode(prior=prior_value)
                         child_node.parent = node  # CRITICAL FIX: Set parent relationship
-                        node.children[move] = child_node
+                        node.children[move_idx] = child_node  # FIXED: Use move_idx as key, not move
             
             # Evaluation
             if search_board.is_game_over():

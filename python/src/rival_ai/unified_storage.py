@@ -171,28 +171,63 @@ class UnifiedGameStorage:
         return total
     
     def get_training_ready_count(self) -> int:
-        """Get number of games ready for training (in complete batches)"""
+        """Get number of games ready for training (in complete batches, excluding UCI games)"""
         total_games = 0
         
-        # Count actual games in batch files
+        # Count actual games in batch files, excluding UCI tournament games
         for batch_file in self.unified_dir.glob("batch_*.json.gz"):
             try:
                 with gzip.open(batch_file, 'rt', encoding='utf-8') as f:
                     batch_data = json.load(f)
-                    total_games += batch_data.get("game_count", 0)
+                    
+                    # Count only non-UCI games in this batch
+                    non_uci_games = 0
+                    for game_dict in batch_data.get("games", []):
+                        game_source = game_dict.get("source", "")
+                        if game_source != GameSource.UCI_TOURNAMENT.value:
+                            non_uci_games += 1
+                    
+                    total_games += non_uci_games
+                    
             except Exception as e:
                 logger.warning(f"Could not read batch {batch_file}: {e}")
         
         return total_games
     
     def prepare_training_data(self, max_batches: Optional[int] = None) -> List[Path]:
-        """Prepare training data by collecting batch files"""
+        """Prepare training data by collecting batch files (excluding UCI-only batches)"""
         batch_files = sorted(self.unified_dir.glob("batch_*.json.gz"))
         
-        if max_batches:
-            batch_files = batch_files[:max_batches]
+        # Filter out batches that contain only UCI tournament games
+        filtered_batch_files = []
+        for batch_file in batch_files:
+            try:
+                with gzip.open(batch_file, 'rt', encoding='utf-8') as f:
+                    batch_data = json.load(f)
+                    
+                    # Check if this batch has any non-UCI games
+                    has_training_games = False
+                    for game_dict in batch_data.get("games", []):
+                        game_source = game_dict.get("source", "")
+                        if game_source != GameSource.UCI_TOURNAMENT.value:
+                            has_training_games = True
+                            break
+                    
+                    if has_training_games:
+                        filtered_batch_files.append(batch_file)
+                    else:
+                        logger.info(f"🚫 Skipping UCI-only batch: {batch_file.name}")
+                        
+            except Exception as e:
+                logger.warning(f"Could not read batch {batch_file}: {e}")
+                # Include the batch anyway if we can't read it (safer approach)
+                filtered_batch_files.append(batch_file)
         
-        return batch_files
+        if max_batches:
+            filtered_batch_files = filtered_batch_files[:max_batches]
+        
+        logger.info(f"📚 Training data: {len(filtered_batch_files)} batches (UCI batches excluded)")
+        return filtered_batch_files
     
     def archive_used_batches(self, batch_files: List[Path]) -> Path:
         """Archive batches that were used for training"""

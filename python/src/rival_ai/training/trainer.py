@@ -275,6 +275,11 @@ class Trainer:
                     
                     # Extract training positions from all games in this batch
                     for game_dict in batch_data.get('games', []):
+                        # Skip UCI tournament games - they should not be used for training
+                        game_source = game_dict.get('source', '')
+                        if game_source == 'uci_tournament':
+                            continue
+                            
                         for position in game_dict.get('positions', []):
                             total_positions += 1
                             batch_positions += 1

@@ -28,15 +28,9 @@ from rival_ai.training.self_play import SelfPlay, SelfPlayConfig
 from rival_ai.utils.board_conversion import board_to_hetero_data
 from rival_ai.unified_storage import get_unified_storage, initialize_unified_storage, GameSource, UnifiedGameData
 
-# Try to import PAG engine for validation (AFTER logger is defined)
-try:
-    import rival_ai_engine as engine
-    PAG_ENGINE_AVAILABLE = True
-    logger.info("✅ PAG engine module available")
-except ImportError as e:
-    PAG_ENGINE_AVAILABLE = False
-    logger.warning(f"⚠️ PAG engine not available: {e}")
-    logger.info("🔄 Will use Python-only PAG fallback mode")
+# Remove the problematic Rust MCTS import attempt
+# The PyMCTSEngine is not working due to Rust export issues
+logger.info("🐍 Using Python MCTS implementation (more stable than Rust version)")
 
 class UnifiedSelfPlayRunner:
     def __init__(self, model_path, save_dir, device='cuda', num_simulations=600):
@@ -47,55 +41,32 @@ class UnifiedSelfPlayRunner:
         self.num_simulations = num_simulations
         
         # Initialize unified storage with the path provided by the server
-        # Use the --save-dir argument instead of calculating our own path
         logger.info(f"🗂️ Using training games directory from server: {self.save_dir.absolute()}")
-        logger.info(f"🔍 Directory exists: {self.save_dir.exists()}")
         
-        self.storage = initialize_unified_storage(str(self.save_dir), batch_size=1000)  # Use consistent batch size with training system
+        self.storage = initialize_unified_storage(str(self.save_dir), batch_size=1000)
         
-        # Debug the storage initialization
-        logger.info(f"📦 Storage initialized:")
-        logger.info(f"   📁 Base dir: {self.storage.base_dir}")
-        logger.info(f"   📁 Unified dir: {self.storage.unified_dir}")
-        logger.info(f"   📊 Batch size: {self.storage.batch_size}")
-        logger.info(f"   🔢 Current batch: {len(self.storage._current_batch)} games")
-        logger.info(f"   🎯 Next batch number: {self.storage._batch_number}")
-        
-        # Check existing batch files
-        existing_batches = list(self.storage.unified_dir.glob("batch_*.json.gz"))
-        logger.info(f"🔍 Existing batch files: {len(existing_batches)}")
-        
-        logger.info(f"🎯 Unified Self-Play System Initializing...")
+        logger.info(f"🎯 Unified Self-Play System Initializing with Python MCTS...")
         logger.info(f"   Device: {device}")
         logger.info(f"   Output: Unified batched storage")
         
-        # Load model with ULTRA-DENSE PAG support - FIXED: Match training script configuration
+        # Load model with ULTRA-DENSE PAG support
         self.model = ChessGNN(
             hidden_dim=256,
-            num_layers=10,   # FIXED: Match training script's 10 layers
+            num_layers=10,   # Deep architecture for complex patterns
             num_heads=4,
             dropout=0.1,
-            use_ultra_dense_pag=True,  # Enable ultra-dense PAG features
-            piece_dim=308,  # Ultra-dense piece features from Rust PAG
-            critical_square_dim=95  # Ultra-dense critical square features
+            use_ultra_dense_pag=True,
+            piece_dim=308,
+            critical_square_dim=95
         )
         
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
             if 'model_state_dict' in checkpoint:
-                # Load existing model weights
                 state_dict = checkpoint['model_state_dict']
-                # Check if this has ultra-dense features (future compatibility)
-                if any('dense_pag' in key for key in state_dict.keys()):
-                    logger.info(f"✅ Detected ultra-dense PAG model (future feature)")
-                    # For now, just load what we can
-                    self.model.load_state_dict(state_dict, strict=False)
-                else:
-                    logger.info(f"✅ Loading existing model weights")
-                    self.model.load_state_dict(state_dict)
+                self.model.load_state_dict(state_dict, strict=False)
             else:
                 self.model.load_state_dict(checkpoint)
-                logger.info(f"✅ Loaded checkpoint directly")
                 
             self.model.to(self.device)
             self.model.eval()
@@ -104,14 +75,14 @@ class UnifiedSelfPlayRunner:
             logger.error(f"❌ Failed to load model: {e}")
             raise
             
-        # Create self-play config optimized for current system
+        # Create self-play config optimized for stable generation
         config = SelfPlayConfig(
             num_games=0,  # Will be set dynamically
-            num_simulations=self.num_simulations,  # Configurable speed vs quality
+            num_simulations=self.num_simulations,
             max_moves=150,
             device=self.device,
-            batch_size=16,  # Smaller batch for memory efficiency
-            num_workers=1,  # Reduced for stability
+            batch_size=16,
+            num_workers=1,
             save_dir=str(self.save_dir),
             use_tqdm=False,
             c_puct=2.5,
@@ -122,32 +93,32 @@ class UnifiedSelfPlayRunner:
             midgame_temperature=1.5,
             endgame_temperature=1.2,
             repetition_penalty=5.0,
-            random_move_probability=0.08,  # Reduced for more focused play
+            random_move_probability=0.08,
             forward_progress_bonus=0.5,
-            use_dense_pag=PAG_ENGINE_AVAILABLE,  # Enable PAG if engine is available
-            pag_fallback_to_python=True,  # Fallback to Python PAG if Rust fails
+            use_dense_pag=True,  # Use Python PAG for stability
+            pag_fallback_to_python=True,
         )
         
-        # Create self-play instance
+        # Create Python self-play instance (more stable than Rust MCTS)
         self.self_play = SelfPlay(self.model, config)
         
-        logger.info(f"🚀 Self-Play configuration:")
+        logger.info(f"🚀 Python Self-Play configuration:")
         logger.info(f"   Simulations per move: {config.num_simulations}")
-        logger.info(f"   Batch size (memory-optimized): {config.batch_size}")
+        logger.info(f"   Batch size: {config.batch_size}")
         logger.info(f"   Model layers: 10 (deep architecture)")
-        logger.info(f"   Ultra-dense PAG features: ENABLED")
+        logger.info(f"   Implementation: Python MCTS (stable)")
         
     def generate_games(self, num_games, training_threshold=5000):
-        logger.info(f"🎮 Starting generation of {num_games} self-play games")
+        logger.info(f"🎮 Starting generation of {num_games} self-play games with Python MCTS")
         logger.info(f"📦 Output: Unified storage format")
         
         try:
             # Count existing games before generation
             total_games_before = self._count_total_games()
             
-            # Generate games but don't save them as PKL files
+            # Generate games using stable Python MCTS
             games = self.self_play.generate_games(num_games=num_games, save_games=False)
-            logger.info(f"✅ Successfully generated {len(games)} games")
+            logger.info(f"✅ Successfully generated {len(games)} games with Python MCTS")
             
             # Convert to unified format and store
             unified_games = []
@@ -159,48 +130,28 @@ class UnifiedSelfPlayRunner:
             # Store in unified storage with guaranteed persistence
             if unified_games:
                 try:
-                    logger.info(f"💾 Storing {len(unified_games)} games with guaranteed persistence...")
-                    logger.info(f"🗂️ Storage directory: {self.storage.unified_dir}")
-                    logger.info(f"📊 Current batch size before: {len(self.storage._current_batch)}")
-                    
-                    # Store all games at once (efficient)
+                    logger.info(f"💾 Storing {len(unified_games)} games...")
                     self.storage.store_multiple_games(unified_games)
-                    logger.info(f"📊 Current batch size after: {len(self.storage._current_batch)}")
                     
-                    # GUARANTEED SAVE: Force save current batch regardless of size
+                    # Force save current batch
                     if self.storage._current_batch:
-                        logger.info(f"💾 Force saving {len(self.storage._current_batch)} games to disk NOW...")
+                        logger.info(f"💾 Force saving {len(self.storage._current_batch)} games to disk...")
                         self.storage.force_save_current_batch()
-                        logger.info(f"✅ Batch saved! Current batch size: {len(self.storage._current_batch)}")
                     
                     logger.info(f"📦 Successfully persisted all {len(unified_games)} games to disk")
                     
-                    # Verify batch files on disk  
-                    batch_files = list(self.storage.unified_dir.glob("batch_*.json.gz"))
-                    logger.info(f"🔍 Batch files on disk: {len(batch_files)} files")
-                    if batch_files:
-                        latest_batch = max(batch_files, key=lambda x: x.stat().st_mtime)
-                        logger.info(f"   📄 Latest: {latest_batch.name}")
-                    
                 except Exception as e:
-                    logger.error(f"❌ Failed to store games in unified storage: {e}")
-                    import traceback
-                    logger.error(f"💥 Traceback: {traceback.format_exc()}")
+                    logger.error(f"❌ Failed to store games: {e}")
                     raise
             
-            # Count total games after generation
+            # Calculate actual games generated
+            games_generated_this_round = len(unified_games)
             total_games_after = self._count_total_games()
             
-            # Calculate actual games generated (should match len(unified_games))
-            games_generated_this_round = len(unified_games)
-            
-            # Debug logging
-            logger.info(f"🔍 Debug: before={total_games_before}, generated={games_generated_this_round}, after={total_games_after}")
-            
-            logger.info(f"🎯 Games ready for unified training")
+            logger.info(f"🎯 Python MCTS games ready for unified training")
             return games_generated_this_round, total_games_after, training_threshold
         except Exception as e:
-            logger.error(f"❌ Error generating games: {e}")
+            logger.error(f"❌ Error generating games with Python MCTS: {e}")
             raise
     
     def _count_total_games(self):

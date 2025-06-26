@@ -1133,7 +1133,7 @@ class UltraDenseModelWrapper:
         
         # Try to load checkpoint to determine model type
         try:
-            checkpoint = torch.load('{}', map_location='cpu')
+            checkpoint = torch.load(r'{}', map_location='cpu')
             print("✅ Checkpoint loaded successfully")
             
             # Use existing ChessGNN interface with matching architecture

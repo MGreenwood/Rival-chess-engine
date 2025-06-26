@@ -165,6 +165,90 @@ impl PyPAGEngine {
         let duration = start.elapsed();
         Ok(duration.as_secs_f64() / iterations as f64)
     }
+    
+    /// Simple test function to verify compilation
+    fn test_simple(&self) -> PyResult<String> {
+        Ok("Debug functions are working!".to_string())
+    }
+    
+    /// Debug function to test piece_attacks_square directly
+    fn test_piece_attacks_square(&mut self, fen: &str, from_square: u8, to_square: u8) -> PyResult<bool> {
+        use chess::{Board, Square, ALL_SQUARES};
+        use std::str::FromStr;
+        
+        let board = Board::from_str(fen)
+            .map_err(|e| PyValueError::new_err(format!("Invalid FEN: {}", e)))?;
+        
+        if from_square >= 64 || to_square >= 64 {
+            return Err(PyValueError::new_err("Square index must be 0-63"));
+        }
+        
+        let from = ALL_SQUARES[from_square as usize];
+        let to = ALL_SQUARES[to_square as usize];
+        
+        // Create a feature extractor to test the function
+        let extractor = crate::pag::feature_extraction::FeatureExtractor::new();
+        Ok(extractor.piece_attacks_square(&board, from, to))
+    }
+    
+    /// Debug function to test count_defenders directly
+    fn test_count_defenders(&mut self, fen: &str, square: u8) -> PyResult<f32> {
+        use chess::{Board, Square, ALL_SQUARES};
+        use std::str::FromStr;
+        
+        let board = Board::from_str(fen)
+            .map_err(|e| PyValueError::new_err(format!("Invalid FEN: {}", e)))?;
+        
+        if square >= 64 {
+            return Err(PyValueError::new_err("Square index must be 0-63"));
+        }
+        
+        let target_square = ALL_SQUARES[square as usize];
+        
+        // Create a feature extractor to test the function
+        let extractor = crate::pag::feature_extraction::FeatureExtractor::new();
+        Ok(extractor.count_defenders(&board, target_square))
+    }
+    
+    /// Debug function to test count_attackers_for_color directly
+    fn test_count_attackers_for_color(&mut self, fen: &str, square: u8, color: &str) -> PyResult<f32> {
+        use chess::{Board, Square, Color, ALL_SQUARES};
+        use std::str::FromStr;
+        
+        let board = Board::from_str(fen)
+            .map_err(|e| PyValueError::new_err(format!("Invalid FEN: {}", e)))?;
+        
+        if square >= 64 {
+            return Err(PyValueError::new_err("Square index must be 0-63"));
+        }
+        
+        let target_square = ALL_SQUARES[square as usize];
+        let attacking_color = match color.to_lowercase().as_str() {
+            "white" => Color::White,
+            "black" => Color::Black,
+            _ => return Err(PyValueError::new_err("Color must be 'white' or 'black'")),
+        };
+        
+        // Create a feature extractor to test the function
+        let extractor = crate::pag::feature_extraction::FeatureExtractor::new();
+        Ok(extractor.count_attackers_for_color(&board, target_square, attacking_color))
+    }
+    
+    /// Debug function to test can_king_attack directly
+    fn test_can_king_attack(&mut self, from_square: u8, to_square: u8) -> PyResult<bool> {
+        use chess::{Square, ALL_SQUARES};
+        
+        if from_square >= 64 || to_square >= 64 {
+            return Err(PyValueError::new_err("Square index must be 0-63"));
+        }
+        
+        let from = ALL_SQUARES[from_square as usize];
+        let to = ALL_SQUARES[to_square as usize];
+        
+        // Create a feature extractor to test the function
+        let extractor = crate::pag::feature_extraction::FeatureExtractor::new();
+        Ok(extractor.can_king_attack(from, to))
+    }
 }
 
 impl PyPAGEngine {
@@ -183,6 +267,7 @@ impl PyPAGEngine {
             if let Some(node) = pag.get_node(piece_id) {
                 if let NodeType::DensePiece(_) = node {
                     let features = node.to_feature_vector();
+                    
                     assert_eq!(features.len(), 308, "Piece features should be 308 dimensions");
                     all_features.push(features);
                     node_types.push("piece".to_string());

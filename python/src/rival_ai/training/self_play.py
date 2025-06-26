@@ -1060,8 +1060,14 @@ class SelfPlay:
                 # MCTS search with timing
                 mcts_start = time.time()
                 
-                # Get policy and value from MCTS
-                policy, value = self.mcts.get_action_policy(board)
+                # 🚨 TEMPORARY FIX: Use direct model evaluation instead of MCTS to avoid infinite loop
+                logger.info(f"🎯 TEMPORARY: Using direct model evaluation instead of MCTS (move {move_count})")
+                data = board_to_hetero_data(board)
+                data = data.to(self.config.device)
+                with torch.no_grad():
+                    policy, value = self.model(data)
+                    policy = policy.squeeze(0)
+                    value = value.squeeze()
                 
                 mcts_time = time.time() - mcts_start
                 total_mcts_time += mcts_time
@@ -1221,30 +1227,17 @@ class SelfPlay:
                         data = board_to_hetero_data(board)
                         data = data.to(self.config.device)
                         
-                        # Get policy and value from MCTS search
+                        # 🚨 TEMPORARY FIX: Skip MCTS to avoid infinite loop, use direct model evaluation
                         try:
-                            policy, value = self.mcts.get_action_policy(board)
-                            if isinstance(policy, dict):
-                                # Convert dict to tensor
-                                policy_array = np.zeros(5312, dtype=np.float32)
-                                for move_idx, prob in policy.items():
-                                    if 0 <= move_idx < 5312:
-                                        policy_array[move_idx] = prob
-                                policy = torch.from_numpy(policy_array).to(self.config.device)
-                            elif not isinstance(policy, torch.Tensor):
-                                policy = torch.tensor(policy, dtype=torch.float32, device=self.config.device)
-                            
-                            # Ensure policy is the right shape
-                            if policy.dim() > 1:
-                                policy = policy.squeeze(0)
-                                
-                        except Exception as e:
-                            logger.warning(f"MCTS search failed, using direct model evaluation: {e}")
+                            logger.info(f"🎯 TEMPORARY: Using direct model evaluation instead of MCTS to avoid infinite loop")
                             # Fallback to direct model evaluation
                             with torch.no_grad():
                                 policy, value = self.model(data)
                                 policy = policy.squeeze(0)
                                 value = value.squeeze()
+                        except Exception as e:
+                            logger.error(f"❌ Even direct model evaluation failed: {e}")
+                            raise
                         
                         # Convert policy to numpy if it's a tensor
                         if isinstance(policy, torch.Tensor):

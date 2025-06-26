@@ -70,7 +70,8 @@ impl DensePAGBuilder {
     pub fn build_from_fen(&mut self, fen: &str) -> Result<PAG, String> {
         let board = chess::Board::from_str(fen)
             .map_err(|e| format!("Invalid FEN: {}", e))?;
-        Ok(self.build_from_board(&board))
+        let result = self.build_from_board(&board);
+        Ok(result)
     }
     
     /// Get statistics about the PAG construction
