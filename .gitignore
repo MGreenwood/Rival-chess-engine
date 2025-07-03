@@ -26,6 +26,7 @@ env/
 ENV/
 .env
 .venv
+venvEngine/
 
 # Model files and checkpoints
 *.pkl
@@ -58,9 +59,27 @@ logs/
 !requirements.txt
 !README.txt
 
+# Training games and data
+training_games/
+python/training_games/
+engine/training_games/
+**/training_games/unified/
+**/training_games/archives/
+**/training_games/community/
+**/training_games/single_player/
+**/training_games/uci_matches/
+**/training_games/processed/
+**/training_games/raw/
+**/training_games/batch_*.json.gz
+
 # Self-play data
 self_play_data/
 test_output/
+
+# Results and tournaments
+results/
+**/results/tournaments/
+**/results/experiments/
 
 # IDE specific files
 .idea/
@@ -104,13 +123,25 @@ engine/target/
 *.rlib
 *.rmeta
 
-# Virtual Environment
-venv/
-env/
-ENV/
-.env
-.venv
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Web build artifacts
+engine/web/dist/
+engine/web/build/
 
 # Cloudflare tunnel credentials and generated files
 cloudflare-tunnel/*.json
 cloudflare-tunnel/tunnel-config-generated.yml
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

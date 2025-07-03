@@ -1,8 +1,22 @@
 # RivalAI Chess Engine
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-1.70+-blue.svg)](https://www.rust-lang.org/)
+[![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-orange.svg)](https://nodejs.org/)
+
 A modern chess engine that combines Graph Neural Networks (GNNs) with Monte Carlo Tree Search (MCTS), featuring a novel position representation system called CHESS (Chess Heterogeneous Encoding State System). The engine uses Positional Adjacency Graphs (PAG) to represent chess positions as rich graph structures, capturing piece relationships and strategic dynamics.
 
-## Architecture Overview
+## 🚀 Features
+
+- **High-Performance Engine**: Sub-millisecond move generation with 50,000+ MCTS nodes/second
+- **Neural Network Integration**: 4-layer Graph Neural Network with Graph Attention (GAT)
+- **Multiple Interfaces**: Web server, UCI protocol, and command-line interfaces
+- **Community Gaming**: Real-time collaborative gameplay with voting systems
+- **Automated Training**: Background self-play generation and model training
+- **Tournament Ready**: Full UCI protocol compliance for competitive play
+
+## 🏗️ Architecture
 
 RivalAI consists of three main components:
 
@@ -48,7 +62,7 @@ Modern web interface with real-time features:
 - Training progress monitoring
 - WebSocket communication (<50ms latency)
 
-## Game Modes
+## 🎮 Game Modes
 
 ### Single Player Mode
 Traditional one-on-one gameplay against the AI with:
@@ -76,46 +90,7 @@ Automated competitive play against other engines:
 - Performance tracking and statistics
 - Continuous learning from competitive play
 
-## Storage and Training System
-
-### Unified Storage
-All games are stored in a unified format for efficient training:
-```
-training_games/
-├── unified/           # Batched training data (1000 games per batch)
-├── archives/          # Processed training batches
-└── training/          # Active training datasets
-```
-
-**Features:**
-- Automatic batching of games for training
-- Compressed storage with gzip
-- Consistent format across all game types
-- Metadata preservation for analysis
-- Automatic archiving after training
-
-### Training Pipeline
-Automated training system with several modes:
-
-**Background Training:**
-- Monitors unified storage for sufficient training data
-- Automatically triggers training sessions when thresholds are met
-- Protects community games during training
-- Reloads improved models automatically
-
-**Self-Play Generation:**
-- Adaptive scaling based on GPU utilization and player activity
-- Intelligent priority system (community games get highest priority)
-- Background generation during low traffic periods
-- Automatic game storage in unified format
-
-**UCI Training Integration:**
-- Every tournament game becomes training data
-- Automatic conversion from UCI matches to training format
-- High-quality positions from strong opponent play
-- Objective benchmarking and progress measurement
-
-## Technical Specifications
+## 📊 Technical Specifications
 
 ### Performance
 - Move computation: <100ms
@@ -151,9 +126,10 @@ Output Heads:
 └── Value Head → Position evaluation
 ```
 
-## Setup Instructions
+## 🛠️ Installation
 
 ### Prerequisites
+
 1. **Rust** (latest stable):
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -196,7 +172,7 @@ cd engine/web
 npm run build
 ```
 
-## Running the System
+## 🚀 Quick Start
 
 ### Web Server Mode
 Start the complete web application:
@@ -235,33 +211,7 @@ python scripts/server_training.py \
     --tensorboard
 ```
 
-## Key Features
-
-### Smart Training Data Collection
-- Every game (single-player, community, UCI) contributes to training
-- Automatic conversion to unified training format
-- Batch processing for efficient training
-- Quality filtering and validation
-
-### Adaptive System Behavior
-- GPU utilization monitoring for optimal resource usage
-- Traffic-aware self-play scaling
-- Community game priority protection
-- Automatic model reloading after training
-
-### Comprehensive Game Support
-- Single-player games with full engine strength
-- Community voting games with real-time collaboration
-- UCI tournament integration for competitive play
-- Game resumption and history browsing
-
-### Advanced Analysis
-- Position evaluation with PAG features
-- Move quality assessment
-- Training progress visualization
-- Performance benchmarking against standard engines
-
-## Development Commands
+## 🔧 Development
 
 ### Most Used Commands
 
@@ -291,7 +241,7 @@ cd python && python check_data.py
 - `python/scripts/server_self_play.py` - Self-play generation
 - `python/check_data.py` - Training data status checker
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 RivalAI/
@@ -326,39 +276,39 @@ RivalAI/
 └── docs/                 # Documentation
 ```
 
-## Current Status
+## 📈 Current Status
 
-### Completed Features
-- ✅ Complete chess engine with web interface
-- ✅ PAG-based position representation
-- ✅ GNN model with policy and value heads
-- ✅ MCTS integration with neural guidance
-- ✅ Unified storage system for all game types
-- ✅ Automated training pipeline
-- ✅ UCI tournament integration
-- ✅ Community game mode with voting
-- ✅ Background self-play generation
-- ✅ Real-time statistics and monitoring
-- ✅ Game persistence and resumption
-- ✅ TensorBoard integration
+### ✅ Completed Features
+- Complete chess engine with web interface
+- PAG-based position representation
+- GNN model with policy and value heads
+- MCTS integration with neural guidance
+- Unified storage system for all game types
+- Automated training pipeline
+- UCI tournament integration
+- Community game mode with voting
+- Background self-play generation
+- Real-time statistics and monitoring
+- Game persistence and resumption
+- TensorBoard integration
 
-### In Development
-- 🚧 Opening book integration
-- 🚧 Endgame tablebase support
-- 🚧 Advanced move explanations
-- 🚧 Distributed training
-- 🚧 Tournament rating calculations
+### 🚧 In Development
+- Opening book integration
+- Endgame tablebase support
+- Advanced move explanations
+- Distributed training
+- Tournament rating calculations
 
-### Planned Features
-- 📋 Swiss tournament system
-- 📋 Advanced analysis tools
-- 📋 Mobile web interface
-- 📋 API for external integrations
-- 📋 Research publication features
+### 📋 Planned Features
+- Swiss tournament system
+- Advanced analysis tools
+- Mobile web interface
+- API for external integrations
+- Research publication features
 
-## Contributing
+## 🤝 Contributing
 
-The codebase follows these principles:
+We welcome contributions! The codebase follows these principles:
 - Rust for performance-critical components
 - Python for ML and analysis
 - React for modern web interface
@@ -366,5 +316,16 @@ The codebase follows these principles:
 - Modular design for easy extension
 
 See [DESIGN.md](DESIGN.md) for detailed architecture documentation and [MILESTONES.md](MILESTONES.md) for development roadmap.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Chess programming community for inspiration and standards
+- Rust and Python ecosystems for excellent tooling
+- React and modern web technologies for the interface
+- Open source chess engines for benchmarking and comparison
 
 
