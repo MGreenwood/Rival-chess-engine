@@ -308,14 +308,14 @@ RivalAI/
 
 ## 🤝 Contributing
 
-We welcome contributions! The codebase follows these principles:
-- Rust for performance-critical components
-- Python for ML and analysis
-- React for modern web interface
-- Comprehensive testing and documentation
-- Modular design for easy extension
+This is currently a personal research project and is **not accepting external contributions** at this time. The project is being developed as a learning exercise and research platform for chess AI development.
 
-See [DESIGN.md](DESIGN.md) for detailed architecture documentation and [MILESTONES.md](MILESTONES.md) for development roadmap.
+If you have questions about the project or want to discuss the implementation, feel free to:
+- Open an issue for bug reports
+- Start a discussion about the technical approach
+- Fork the project for your own research
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for more details, [DESIGN.md](DESIGN.md) for detailed architecture documentation, and [MILESTONES.md](MILESTONES.md) for development roadmap.
 
 ## 📄 License
 
