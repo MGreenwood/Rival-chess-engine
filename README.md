@@ -7,6 +7,8 @@
 
 A modern chess engine that combines Graph Neural Networks (GNNs) with Monte Carlo Tree Search (MCTS), featuring a novel position representation system called CHESS (Chess Heterogeneous Encoding State System). The engine uses Positional Adjacency Graphs (PAG) to represent chess positions as rich graph structures, capturing piece relationships and strategic dynamics.
 
+Go see it live NOW at https://rivalchess.xyz
+
 ## 🚀 Features
 
 - **High-Performance Engine**: Sub-millisecond move generation with 50,000+ MCTS nodes/second
